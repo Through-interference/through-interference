@@ -23,7 +23,7 @@
 Закрыть панель, чтобы освободить наземный serial-порт. Запустить:
 
 ```bash
-/Users/timurkh/Desktop/BAS/through-interference/start-console.command
+/Users/timurkh/Desktop/BAS/through-interference/start-console.command --port /dev/cu.usbserial-10
 ```
 
 В появившейся консоли:
@@ -42,7 +42,11 @@ exit
 КОМПЬЮТЕР ПОЛУЧИЛ | ID=123 | DLC=4 | DATA=04050607
 ```
 
-По умолчанию CAN ID=0x123, скорость 500000. Другой ID: `start-console.command --id 456`. Для реального CAN-узла БВС вместо CANable: `--no-canable`, команда `bvs` тогда недоступна. Автоматический тест двух диагностических сообщений: `start-console.command --demo`. Консоль не меняет прошивки или сохранённые профили.
+По умолчанию CAN ID=0x123, скорость 500000. Другой ID: `start-console.command --id 456`. Для реального CAN-узла БВС вместо CANable: `--no-canable`, команда `bvs` тогда недоступна. Автоматический тест двух диагностических сообщений: `start-console.command --port /dev/cu.usbserial-10 --demo`. Консоль не меняет прошивки или сохранённые профили.
+
+## Проверка на двух компьютерах
+
+Windows подключается к USB наземного ESP32, Mac с CANable подключается к CAN борта. На Windows запустить `start-ground.bat`, на Mac `start-air.command`. На обеих сторонах команда `send 00010203` отправляет данные на другой компьютер. Пошаговая схема и ожидаемые строки приёма: [TWO_COMPUTERS.md](docs/TWO_COMPUTERS.md).
 
 ## Развёртывание из чистого checkout
 
