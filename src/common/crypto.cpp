@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "crypto_secrets.h"
+#include "AtCommandManager.h"
 
 // Максимум полезных данных в одном пакете.
 // Кадр кодируется шестнадцатеричными символами.
@@ -27,6 +28,7 @@ static bool ready = false;
 static uint64_t txCounter = 0;
 static uint64_t txBlockEnd = 0;
 static uint64_t lastRxCounter = 0;
+static uint64_t lastPersistedRxCounter = 0;
 
 // При резервировании сохраняем сразу 32 значения.
 // После перезапуска неиспользованный остаток блока пропускается.
@@ -157,29 +159,57 @@ static void appendBytesHex(
 // ============================================================
 // ИНИЦИАЛИЗАЦИЯ
 // ============================================================
-
 bool cryptoInit() {
     using namespace crypto_detail;
 
     if (ready) return true;
 
-    // NVS хранит верхнюю границу ранее зарезервированного TX-блока.
     if (!prefs.begin("cryptolink", false)) {
         return false;
     }
 
     txCounter = prefs.getULong64("txctr", 0);
     txBlockEnd = txCounter;
-
-    // RX-счётчик хранит последний действительно принятый пакет.
     lastRxCounter = prefs.getULong64("rxctr", 0);
+    lastPersistedRxCounter = lastRxCounter;
 
     mbedtls_gcm_init(&gcm);
+
+    // Проверяем, есть ли сохраненный ключ в NVS от AtCommandManager (профиль bind.py)
+    Preferences cfgPrefs;
+    uint8_t activeKey[16];
+    bool hasCustomKey = false;
+
+    if (cfgPrefs.begin("modem_cfg", true)) {
+        if (cfgPrefs.isKey("cfg_blob")) {
+            ModemConfig tempCfg;
+            cfgPrefs.getBytes("cfg_blob", &tempCfg, sizeof(ModemConfig));
+            // Проверяем, не нулевой ли ключ
+            for (int i = 0; i < 16; i++) {
+                if (tempCfg.aesKey[i] != 0) {
+                    hasCustomKey = true;
+                    break;
+                }
+            }
+            if (hasCustomKey) {
+                memcpy(activeKey, tempCfg.aesKey, 16);
+            }
+        }
+        cfgPrefs.end();
+    }
+
+    // Если через bind.py ключ еще не задавался, берем заглушку и предупреждаем
+    if (!hasCustomKey) {
+        Serial.println("[CRITICAL] WARNING: No AES key found in NVS! Run bind.py to configure encryption.");
+        memcpy(activeKey, DEFAULT_UNBOUND_AES_KEY, 16);
+    } else {
+        Serial.println("[CRYPTO] Loaded secure AES-128 key from NVS profile.");
+    }
 
     int result = mbedtls_gcm_setkey(
         &gcm,
         MBEDTLS_CIPHER_ID_AES,
-        CRYPTO_AES_KEY,
+        activeKey,
         128
     );
 
@@ -189,8 +219,6 @@ bool cryptoInit() {
         return false;
     }
 
-    // Сразу резервируем новый блок перед использованием счётчиков.
-    // При перезапуске оставшиеся значения старого блока будут пропущены.
     if (!reserveTxBlock()) {
         mbedtls_gcm_free(&gcm);
         prefs.end();
@@ -294,7 +322,8 @@ CryptoPacketStatus cryptoDecryptBytes(
     size_t payloadCapacity,
     size_t &payloadLength,
     uint32_t &senderIdOut,
-    uint64_t &counterOut
+    uint64_t &counterOut,
+    bool persistCounter
 ) {
     using namespace crypto_detail;
 
@@ -392,23 +421,28 @@ CryptoPacketStatus cryptoDecryptBytes(
     }
 
     if (counter == lastRxCounter) {
-        // Повтор последнего принятого пакета:
-        // можно заново отправить ACK, но нельзя выполнять команду повторно.
+
+        if (persistCounter &&
+            !cryptoCommitRxCounter(counter)) {
+            return CRYPTO_PACKET_ERROR;
+        }
+
         memcpy(payloadOut, plaintext, cipherLength);
         payloadLength = cipherLength;
-        return CRYPTO_PACKET_DUPLICATE;
-    }
 
-    // RX-счётчик записываем для каждого нового пакета.
-    // Это важно, чтобы после перезапуска не забыть последний пакет.
-    if (prefs.putULong64("rxctr", counter) != sizeof(counter)) {
-        return CRYPTO_PACKET_ERROR;
+        return CRYPTO_PACKET_DUPLICATE;
     }
 
     lastRxCounter = counter;
 
+    if (persistCounter &&
+        !cryptoCommitRxCounter(counter)) {
+        return CRYPTO_PACKET_ERROR;
+    }
+
     memcpy(payloadOut, plaintext, cipherLength);
     payloadLength = cipherLength;
+
     return CRYPTO_PACKET_NEW;
 }
 
@@ -428,7 +462,8 @@ CryptoPacketStatus decryptPacketEx(
     const String &frame,
     String &plain,
     uint32_t &senderId,
-    uint64_t &counter
+    uint64_t &counter,
+    bool persistCounter
 ) {
     uint8_t buffer[CRYPTO_MAX_PLAINTEXT];
     size_t length = 0;
@@ -439,7 +474,8 @@ CryptoPacketStatus decryptPacketEx(
         sizeof(buffer),
         length,
         senderId,
-        counter
+        counter,
+        persistCounter
     );
 
     plain = "";
@@ -466,7 +502,6 @@ CryptoPacketStatus decryptPacketEx(
     return status;
 }
 
-// Совместимость со старым кодом.
 // true возвращается только для нового принятого пакета.
 // Для обработки повторов используй decryptPacketEx().
 bool decryptPacket(const String &frame, String &plain) {
@@ -475,4 +510,42 @@ bool decryptPacket(const String &frame, String &plain) {
 
     return decryptPacketEx(frame, plain, senderId, counter) ==
            CRYPTO_PACKET_NEW;
+}
+
+bool cryptoUpdateKey(const uint8_t newKey[16]) {
+    using namespace crypto_detail;
+
+    if (!ready || newKey == nullptr) {
+        return false;
+    }
+
+    int result = mbedtls_gcm_setkey(
+        &gcm,
+        MBEDTLS_CIPHER_ID_AES,
+        newKey,
+        128
+    );
+
+    return result == 0;
+}
+
+bool cryptoCommitRxCounter(uint64_t counter) {
+    using namespace crypto_detail;
+
+    if (!ready ||
+        counter == 0 ||
+        counter > lastRxCounter) {
+        return false;
+    }
+
+    if (counter <= lastPersistedRxCounter) {
+        return true;
+    }
+
+    if (prefs.putULong64("rxctr", counter) != sizeof(counter)) {
+        return false;
+    }
+
+    lastPersistedRxCounter = counter;
+    return true;
 }

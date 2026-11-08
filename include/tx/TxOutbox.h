@@ -4,23 +4,19 @@
 #include <Preferences.h>
 
 struct TxMessage {
-    uint32_t sequence = 1;
     uint32_t messageId = 0;
     uint32_t senderId = 0;
     uint32_t destinationId = 0;
     String payload;
 };
-
 // Persistent storage for the message currently waiting for ACK.
 class TxOutbox {
 public:
     bool begin();
     bool restore();
-    bool create();
     bool acknowledge();
-
+    bool create(const String& customPayload);
     bool isActive() const;
-    uint32_t sequence() const;
     uint32_t messageId() const;
     const String& encryptedFrame() const;
 

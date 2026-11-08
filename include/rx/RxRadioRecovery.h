@@ -1,11 +1,14 @@
 #pragma once
 
+#include <functional>
 #include <Arduino.h>
 
 class RxRadioRecovery {
 public:
     RxRadioRecovery(bool& transmitFlag, volatile bool& operationDone);
 
+    using ReinitCallback = std::function<bool()>;
+    void setReinitCallback(ReinitCallback cb) { reinitCb_ = cb; }
     bool initializeRadio();
     void scheduleFullRecovery(const char* reason);
     bool startReceiveWithRecovery();
@@ -33,6 +36,8 @@ private:
     unsigned long successfulRecoveries_ = 0;
     unsigned long failedRecoveryAttempts_ = 0;
 
+    ReinitCallback reinitCb_ = nullptr;
+    
     void serviceFullRecovery();
     void serviceReceiveRetry();
 };

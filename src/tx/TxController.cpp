@@ -6,19 +6,143 @@
 #include "radio_config.h"
 #include "radio_hardware.h"
 #include "RadioChannelManager.h"
+#include "AtCommandManager.h"
+#include "frequency_config.h"
 
 namespace {
 const unsigned long ACK_TIMEOUT_MS = 3000;
 const int MAX_RETRIES = 3;
 const int DEGRADED_AFTER_ACK_TIMEOUTS = 2;
 
-const unsigned long NEXT_DATA_DELAY_MS = 1000UL;
 const unsigned long DATA_TX_TIMEOUT_MS = 5000UL;
+
+// Пины для UART2 (CP2102) - боевой канал данных для дрона
+const int DRONE_UART_RX = 16;
+const int DRONE_UART_TX = 17;
+bool applyModemConfigToRadio(const ModemConfig& newCfg) {
+    radio.standby();
+
+    // 1. Проверяем допустимый диапазон частот.
+    if (newCfg.primFreqMhz < 850.0f || newCfg.primFreqMhz > 930.0f ||
+        newCfg.backFreqMhz < 850.0f || newCfg.backFreqMhz > 930.0f) {
+        Serial.println("[TX][AT] Invalid frequency configuration");
+        return false;
+    }
+
+    // 2. Обновляем частоты в менеджере каналов.
+    if (!radioChannelManager.setPrimaryFrequency(newCfg.primFreqMhz)) {
+        Serial.println("[TX][AT] Failed to set primary frequency");
+        return false;
+    }
+
+    if (!radioChannelManager.setBackupFrequency(newCfg.backFreqMhz)) {
+        Serial.println("[TX][AT] Failed to set backup frequency");
+        return false;
+    }
+
+    const float currentFreq = radioChannelManager.currentFrequencyMHz();
+    int16_t state = RADIOLIB_ERR_NONE;
+
+    // 3. Применяем модуляцию.
+    switch (newCfg.modulation) {
+        case classModulation::GFSK100:
+            state = radio.beginFSK(
+                currentFreq, 100.0f, 50.0f, 234.3f,
+                newCfg.txPowerDbm, 16, 1.8f
+            );
+            break;
+
+        case classModulation::GFSK250:
+            state = radio.beginFSK(
+                currentFreq, 250.0f, 125.0f, 467.0f,
+                newCfg.txPowerDbm, 16, 1.8f
+            );
+            break;
+
+        case classModulation::LORA_SF7: {
+            ConfigLoRa_t loraCfg;
+            loraCfg.frequency = currentFreq;
+
+            state = radio.begin(loraCfg);
+
+            if (state == RADIOLIB_ERR_NONE) {
+                state = radio.setSpreadingFactor(7);
+            }
+            break;
+        }
+
+        case classModulation::LORA_SF9: {
+            ConfigLoRa_t loraCfg;
+            loraCfg.frequency = currentFreq;
+
+            state = radio.begin(loraCfg);
+
+            if (state == RADIOLIB_ERR_NONE) {
+                state = radio.setSpreadingFactor(9);
+            }
+            break;
+        }
+
+        default:
+            Serial.println("[TX][AT] Unsupported modulation");
+            return false;
+    }
+
+    // 4. Проверяем результат настройки мощности.
+    if (state == RADIOLIB_ERR_NONE) {
+        state = radio.setOutputPower(newCfg.txPowerDbm);
+    }
+
+    // 5. Проверяем все операции RadioLib, которые возвращают код ошибки.
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print("[TX][AT] Radio reconfiguration error: ");
+        Serial.println(state);
+        return false;
+    }
+
+    // 6. Настраиваем аппаратные пины и обработчик прерывания.
+    radio.setRfSwitchPins(LORA_RXEN, LORA_TXEN);
+    radio.setDio1Action(setFlag);
+
+    // 7. Проверяем, есть ли новый AES-ключ.
+    bool hasCustomKey = false;
+
+    for (int i = 0; i < 16; i++) {
+        if (newCfg.aesKey[i] != 0) {
+            hasCustomKey = true;
+            break;
+        }
+    }
+
+    // 8. Если ключ задан, обновляем его.
+    if (hasCustomKey) {
+        if (!cryptoUpdateKey(newCfg.aesKey)) {
+            Serial.println("[TX][AT] AES-128 key update FAILED");
+            return false;
+        }
+
+        Serial.println("[TX][AT] AES-128 key updated");
+    }
+
+    Serial.println("[TX][AT] Radio configuration applied successfully");
+    return true;
 }
+}
+
+// 1. UART0 (Serial) — сервисный порт (255 = не перехватывать пин LORA_TXEN)
+AtCommandManager atManager(Serial, 255);
 
 void TxController::begin() {
     Serial.begin(115200);
     delay(1000);
+
+    // Загружаем конфигурацию из NVS (если она есть, взводится флаг _configDirty)
+    atManager.begin();
+
+    // 2. Боевой порт (CP2102 / UART2) для команд на дрон
+    Serial2.setRxBufferSize(1024);
+    Serial2.begin(115200, SERIAL_8N1, DRONE_UART_RX, DRONE_UART_TX);
+    
 
     if (!cryptoInit()) {
         Serial.println("AES-GCM initialization failed!");
@@ -52,39 +176,177 @@ void TxController::begin() {
         while (true) delay(1000);
     }
 
-    Serial.println("success!");
-
     radio.setDio1Action(setFlag);
 
-    Serial.println("Encrypted transmitter started");
+    lastHeartbeatAt_ = millis();
 
-    if (!outbox_.restore()) {
-        if (outbox_.sequence() <= TOTAL_MESSAGES) {
-            startNextData();
+    // ВАЖНО: Применяем сохраненный профиль из NVS ДО создания/восстановления пакета в outbox_!
+    ModemConfig bootCfg;
+    bool hasValidKey = false;
+
+    if (atManager.takePendingConfig(bootCfg)) {
+        const bool configApplied = applyModemConfigToRadio(bootCfg);
+
+        if (configApplied) {
+            Serial.println("[TX][BOOT] Bind config applied successfully");
+            currentModulation_ = static_cast<uint8_t>(bootCfg.modulation);
+            hasAppliedOnce_ = true;
+
+            for (int i = 0; i < 16; i++) {
+                if (bootCfg.aesKey[i] != 0) {
+                    hasValidKey = true;
+                    break;
+                }
+            }
         } else {
-            Serial.println(
-                "[TX] No pending outbox and test sequence already complete"
-            );
+            Serial.println("[TX][BOOT] Failed to apply bind config");
         }
-    } else {
-        // Restore the same logical message, encrypted with a fresh crypto counter.
-        retryCount_ = 0;
-        nextDataPending_ = false;
-        sendCurrentData();
     }
+    Serial.println("Encrypted transmitter started");
+    // БЛОКИРОВКА РАДИООБМЕНА, ЕЛИ КЛЮЧА НЕТ
+    if (!hasValidKey) {
+        Serial.println("[CRITICAL] Radio transmission BLOCKED. Run bind.py to configure encryption.");
+        while (true) {
+            atManager.processInput(); // Оставляем доступ только к AT-командам (включая bind.py)
+            delay(50);
+        }
+    }
+    ackCount_ = 0;
 
-    // All earlier sequence numbers were ACKed before next_seq advanced.
-    ackCount_ = (outbox_.sequence() > TOTAL_MESSAGES)
-        ? TOTAL_MESSAGES
-        : static_cast<int>(outbox_.sequence() - 1);
+    // Принудительно очищаем старые зависшие пакеты
+    if (outbox_.isActive()) {
+        outbox_.acknowledge();
+        Serial.println("[TX] Wiped old pending messages from previous session");
+    }
+    
+    const int rxState = radio.startReceive();
+    if (rxState != RADIOLIB_ERR_NONE) {
+        Serial.print("[TX] Initial startReceive failed: ");
+        Serial.println(rxState);
+    }
+    Serial.println("[TX] Ready for commands");
+    // if (!outbox_.restore()) {
+    //     if (outbox_.sequence() <= TOTAL_MESSAGES) {
+    //         //startNextData();
+    //     } else {
+    //         Serial.println(
+    //             "[TX] No pending outbox and test sequence already complete"
+    //         );
+    //     }
+    // } else {
+    //     retryCount_ = 0;
+    //     nextDataPending_ = false;
+    //     sendCurrentData();
+    // }
+
+    // ackCount_ = (outbox_.sequence() > TOTAL_MESSAGES)
+    //     ? TOTAL_MESSAGES
+    //     : static_cast<int>(outbox_.sequence() - 1);
 }
 
 
 void TxController::update() {
-    if (outbox_.sequence() > TOTAL_MESSAGES) {
-        printSummary();
-        while (true) delay(1000);
+    // 1. Обрабатываем команды с UART0 (Type-C)
+    atManager.processInput();
+
+    // 2. Применяем конфигурацию PHY/MAC/KEY немедленно между передачами
+    if (!transmitFlag_ && !operationDone && !pendingOtaModChange_) {
+        ModemConfig newCfg;
+
+        if (atManager.takePendingConfig(newCfg)) {
+            // Обязательно сбрасываем поиск канала, как мы делали в фиксе дедлока!
+            if (radioChannelManager.isSearching()) {
+                radioChannelManager.stopSearch();
+            }
+
+            const uint8_t newMod = static_cast<uint8_t>(newCfg.modulation);
+
+            // Если изменилась именно МОДУЛЯЦИЯ — сначала шлем приказ ресиверу!
+            if (hasAppliedOnce_ && newMod != currentModulation_) {
+                String modName = "LORA_SF9";
+                if (newCfg.modulation == classModulation::GFSK100) modName = "GFSK100";
+                else if (newCfg.modulation == classModulation::GFSK250) modName = "GFSK250";
+                else if (newCfg.modulation == classModulation::LORA_SF7) modName = "LORA_SF7";
+
+                String otaCmd = "SYS:MOD:" + modName;
+                Serial.print("[TX][OTA] Negotiating modulation change with RX: ");
+                Serial.println(otaCmd);
+
+                // ВАЖНО: Если висит зависшая боевая команда, отменяем её принудительно (иначе outbox_.create вернет false)
+                if (outbox_.isActive()) {
+                    outbox_.acknowledge();
+                    Serial.println("[TX][OTA] Dropped stuck drone command to prioritize system update");
+                }
+
+                if (outbox_.create(otaCmd)) {
+                    pendingOtaModChange_ = true;
+                    pendingOtaCfg_ = newCfg;
+                    retryCount_ = 0;
+                    consecutiveAckTimeouts_ = 0;
+                    sendCurrentData();
+                } else {
+                    atManager.retryPendingConfig();
+                }
+            } else {
+                // Обычное применение (частота, мощность, ключ) применяем немедленно!
+                if (applyModemConfigToRadio(newCfg)) {
+                    currentModulation_ = newMod;
+                    hasAppliedOnce_ = true;
+                    Serial.println("[TX][AT] Applied new radio config");
+                    
+                    // Если в очереди висит неподтвержденная команда — сразу переотправляем её на новых настройках!
+                    if (outbox_.isActive()) {
+                        retryCount_ = 0;
+                        consecutiveAckTimeouts_ = 0;
+                        sendCurrentData();
+                    } else {
+                        const int rxState = radio.startReceive();
+                        if (rxState != RADIOLIB_ERR_NONE) {
+                            Serial.print("[TX][AT] Failed to start RX: ");
+                            Serial.println(rxState);
+                        }
+                    }
+                } else {
+                    Serial.println("[TX][AT] Failed to apply radio config");
+                    atManager.retryPendingConfig();
+                }
+            }
+        }
     }
+    // 3. Читаем боевые команды с правильным приоритетом
+    if (!outbox_.isActive() && !transmitFlag_) {
+        String droneCmd;
+        
+        // Высший приоритет: команды от оператора из Python-панели (USB/AT)
+        if (atManager.takePendingCommand(droneCmd)) {
+            // Команда забрана из кольцевого буфера
+        } 
+        // Низший приоритет: телеметрия от полетного контроллера (UART2)
+        else if (Serial2.available()) {
+            droneCmd = Serial2.readStringUntil('\n');
+            droneCmd.trim();
+        }
+
+        if (droneCmd.length() > 0) {
+            Serial.print("[TX][CMD] Drone command: ");
+            Serial.println(droneCmd);
+
+            if (outbox_.create(droneCmd)) {
+                retryCount_ = 0;
+                consecutiveAckTimeouts_ = 0;
+                sendCurrentData();
+            }
+        }
+    }
+
+    // 4. Обновление телеметрии для RSSI / SNR / STAT
+    ModemTelemetry telem;
+    telem.rssiDbm = radio.getRSSI();
+    telem.snrDb = radio.getSNR();
+    telem.txPackets = ackCount_;
+    telem.rxPackets = ackCount_;
+    telem.linkState = (connectionState_ == CONNECTED) ? classLinkState::TRACKING : classLinkState::LOST;
+    atManager.updateTelemetry(telem);
 
     handleRadioEvent();
     handleTxWatchdog();
@@ -95,39 +357,28 @@ void TxController::update() {
         handleAckTimeout();
     }
 
-    handleScheduledData();
+    // Heartbeat has the lowest priority.
+    if (!outbox_.isActive() &&
+        !transmitFlag_ &&
+        !operationDone &&
+        !radioChannelManager.isSearching() &&
+        millis() - lastHeartbeatAt_ >=
+            LINK_HEARTBEAT_INTERVAL_MS) {
+
+        sendHeartbeat();
+    }
 
     yield();
 }
 
-
-void TxController::startNextData() {
-    if (!outbox_.isActive() && !outbox_.create()) {
-        if (outbox_.sequence() > TOTAL_MESSAGES) return;
-
-        Serial.println(
-            "[TX][FATAL] Could not create a persistent outbox record"
-        );
-
-        while (true) delay(1000);
-    }
-
-    retryCount_ = 0;
-    nextDataPending_ = false;
-    consecutiveAckTimeouts_ = 0;
-
-    sendCurrentData();
-}
-
-
 void TxController::sendCurrentData() {
     radio.standby();
     operationDone = false;
+    heartbeatTx_ = false;
 
     Serial.print("[TX] Sending DATA messageId=");
     Serial.println(outbox_.messageId());
 
-    // Always retransmit the already encrypted Outbox frame.
     String frame = outbox_.encryptedFrame();
 
     transmissionState_ = radio.startTransmit(frame);
@@ -141,8 +392,6 @@ void TxController::sendCurrentData() {
         Serial.println(transmissionState_);
 
         transmitFlag_ = false;
-
-        // Treat a start failure as an expired ACK timeout.
         ackTimer_ = millis() - ACK_TIMEOUT_MS - 1;
     }
 }
@@ -156,14 +405,17 @@ void TxController::handleRadioEvent() {
     if (transmitFlag_) {
         transmissionState_ = radio.finishTransmit();
 
-        if (transmissionState_ == RADIOLIB_ERR_NONE) {
-            Serial.println("[TX] Transmission finished");
-        } else {
-            Serial.print("[TX] Transmission error: ");
-            Serial.println(transmissionState_);
+        if (!heartbeatTx_) {
+            if (transmissionState_ == RADIOLIB_ERR_NONE) {
+                Serial.println("[TX] Transmission finished");
+            } else {
+                Serial.print("[TX] Transmission error: ");
+                Serial.println(transmissionState_);
+            }
         }
 
         transmitFlag_ = false;
+        heartbeatTx_ = false;
 
         const int state = radio.startReceive();
 
@@ -172,13 +424,16 @@ void TxController::handleRadioEvent() {
             Serial.println(state);
 
             if (radioChannelManager.isSearching()) {
-                nextSearchTxAt_ = millis();
+                nextSearchTxAt_ = millis() + 200;
             } else {
                 ackTimer_ = millis() - ACK_TIMEOUT_MS - 1;
             }
         } else {
-            // Start ACK timeout only after DATA transmission has completed.
             ackTimer_ = millis();
+            // даем приемнику TX гарантированное время дождаться ACK после окончания TX!
+            if (radioChannelManager.isSearching()) {
+                nextSearchTxAt_ = millis() + TX_SEARCH_REPEAT_MS; 
+            }
         }
 
         return;
@@ -224,6 +479,35 @@ void TxController::handleReceivedAck() {
         cryptoCounter
     );
 
+    const char* cryptoStatusName = "UNKNOWN";
+
+    switch (cryptoStatus) {
+        case CRYPTO_PACKET_ERROR:
+            cryptoStatusName = "ERROR";
+            break;
+
+        case CRYPTO_PACKET_NEW:
+            cryptoStatusName = "NEW";
+            break;
+
+        case CRYPTO_PACKET_DUPLICATE:
+            cryptoStatusName = "DUPLICATE";
+            break;
+
+        case CRYPTO_PACKET_REPLAY:
+            cryptoStatusName = "REPLAY";
+            break;
+    }
+
+    Serial.printf(
+        "[TX][ACK-CRYPTO] status=%s sender=0x%08lX "
+        "counter=0x%016llX expectedPeer=0x%08lX\n",
+        cryptoStatusName,
+        (unsigned long)senderId,
+        (unsigned long long)cryptoCounter,
+        (unsigned long)CRYPTO_PEER_ID
+    );
+
     if (cryptoStatus != CRYPTO_PACKET_NEW &&
         cryptoStatus != CRYPTO_PACKET_DUPLICATE) {
 
@@ -261,7 +545,6 @@ void TxController::handleReceivedAck() {
     Serial.print("[TX] ACK matched messageId=");
     Serial.println(received.messageId);
 
-    // Commit the ACK to persistent Outbox.
     if (!outbox_.acknowledge()) {
         Serial.println(
             "[TX] ACK was valid, but outbox commit failed; "
@@ -273,12 +556,21 @@ void TxController::handleReceivedAck() {
         radio.startReceive();
         return;
     }
+    // Если это был ACK на команду смены модуляции SYS:MOD:...
+    if (pendingOtaModChange_) {
+        pendingOtaModChange_ = false;
+        Serial.println("[TX][OTA] RX confirmed modulation change! Switching TX radio now...");
+        if (applyModemConfigToRadio(pendingOtaCfg_)) {
+            currentModulation_ = static_cast<uint8_t>(pendingOtaCfg_.modulation);
+            atManager.saveToNvs(); // Автоматически сохраняем в NVS передатчика
+        }
+        radio.startReceive();
+    }
 
-    // Determine whether the ACK was received during channel search.
-    const bool recoveredBySearch =
-        radioChannelManager.isSearching();
+    const bool recoveredBySearch = radioChannelManager.isSearching();
 
     if (recoveredBySearch) {
+
         radioChannelManager.stopSearch();
 
         switchAfterAck_ = false;
@@ -286,25 +578,20 @@ void TxController::handleReceivedAck() {
         Serial.print("[TX][CHANNEL] Connection restored on channel ");
         Serial.println(radioChannelManager.currentChannel());
 
-    } else if (switchAfterAck_) {
+    } else {
 
-        // Soft failover: switch before sending the next DATA.
-        if (radioChannelManager.switchToNext()) {
-            Serial.print(
-                "[TX][CHANNEL] Switching for next DATA to channel "
-            );
-
-            Serial.println(radioChannelManager.currentChannel());
-
-            switchAfterAck_ = false;
-
-        } else {
-            // Keep the flag: try switching again after the next ACK.
+        if (switchAfterAck_) {
             Serial.println(
-                "[TX][CHANNEL] Switch failed; will retry after next ACK"
+                "[TX][CHANNEL] Keeping current channel after ACK"
             );
         }
+
+        // Не переключаем частоту самостоятельно.
+        // RX остаётся на канале, на котором отправил ACK.
+        switchAfterAck_ = false;
     }
+
+    lastHeartbeatAt_ = millis();
 
     ackCount_++;
 
@@ -312,17 +599,10 @@ void TxController::handleReceivedAck() {
     consecutiveAckTimeouts_ = 0;
 
     setConnectionState(CONNECTED);
-
-    // Schedule the next logical message.
-    if (outbox_.sequence() <= TOTAL_MESSAGES) {
-        nextDataAt_ = millis() + NEXT_DATA_DELAY_MS;
-        nextDataPending_ = true;
-    }
 }
 
 
 void TxController::handleTxWatchdog() {
-    // If TX completion IRQ never arrives, keep the Outbox and retry DATA.
     if (!transmitFlag_ ||
         (unsigned long)(millis() - dataTxStartedAt_) < DATA_TX_TIMEOUT_MS) {
         return;
@@ -349,8 +629,7 @@ void TxController::handleTxWatchdog() {
 void TxController::handleAckTimeout() {
     if (radioChannelManager.isSearching() ||
         transmitFlag_ ||
-        nextDataPending_ ||
-        outbox_.sequence() > TOTAL_MESSAGES ||
+        !outbox_.isActive() ||
         millis() - ackTimer_ <= ACK_TIMEOUT_MS) {
         return;
     }
@@ -360,7 +639,6 @@ void TxController::handleAckTimeout() {
     Serial.print("[TX] ACK timeout; consecutive timeouts: ");
     Serial.println(consecutiveAckTimeouts_);
 
-    // Mark connection as degraded after consecutive ACK timeouts.
     if (consecutiveAckTimeouts_ >= DEGRADED_AFTER_ACK_TIMEOUTS) {
         if (connectionState_ == CONNECTED) {
             setConnectionState(DEGRADED);
@@ -369,7 +647,6 @@ void TxController::handleAckTimeout() {
         switchAfterAck_ = true;
     }
 
-    // Perform normal retransmissions first.
     if (retryCount_ < MAX_RETRIES) {
         retryCount_++;
         totalNormalRetries_++;
@@ -383,24 +660,8 @@ void TxController::handleAckTimeout() {
         return;
     }
 
-    // Normal retries exhausted: begin channel search.
     startChannelSearch();
 }
-
-
-void TxController::handleScheduledData() {
-    if (!nextDataPending_ ||
-        (long)(millis() - nextDataAt_) < 0 ||
-        outbox_.sequence() > TOTAL_MESSAGES ||
-        transmitFlag_) {
-        return;
-    }
-
-    nextDataPending_ = false;
-
-    startNextData();
-}
-
 
 void TxController::setConnectionState(ConnectionState nextState) {
     if (connectionState_ == nextState) return;
@@ -438,63 +699,14 @@ void TxController::setConnectionState(ConnectionState nextState) {
     }
 }
 
-
-void TxController::printSummary() {
-    Serial.println("\n=== TEST SUMMARY ===");
-
-    Serial.print("Total messages: ");
-    Serial.println(TOTAL_MESSAGES);
-
-    Serial.print("ACK received: ");
-    Serial.println(ackCount_);
-
-    Serial.println(
-        "Messages permanently discarded: 0 (persistent outbox policy)"
-    );
-
-    Serial.print("Retry cycles exhausted while transaction remained pending: ");
-    Serial.println(retryCyclesExhausted_);
-
-    Serial.print("ACK rate: ");
-    Serial.print(100.0 * ackCount_ / TOTAL_MESSAGES);
-    Serial.println("%");
-
-    Serial.print("Normal retries: ");
-    Serial.println(totalNormalRetries_);
-
-    Serial.print("Recovery attempts: ");
-    Serial.println(totalRecoveryAttempts_);
-
-    Serial.print("Recovery episodes: ");
-    Serial.println(recoveryEpisodes_);
-
-    Serial.print("Successful recoveries: ");
-    Serial.println(successfulRecoveries_);
-
-    Serial.print("Accumulated recovery time: ");
-    Serial.print(totalRecoveryTimeMs_);
-    Serial.println(" ms");
-
-    if (connectionState_ == RECOVERY) {
-        Serial.print("Unfinished recovery duration: ");
-        Serial.print(millis() - recoveryStartedAt_);
-        Serial.println(" ms");
-    }
-
-    Serial.println("Test complete.");
-}
-
-
 void TxController::startChannelSearch() {
     if (radioChannelManager.isSearching()) return;
 
     Serial.println("[TX][CHANNEL] Starting channel search");
 
-    // Switch frequency first. Enter RECOVERY only if switching succeeds.
     if (!radioChannelManager.startSearch(TX_CHANNEL_DWELL_MS)) {
         Serial.println("[TX][CHANNEL] Cannot start channel search");
 
-        // Avoid retrying startSearch on every update() iteration.
         ackTimer_ = millis();
 
         return;
@@ -529,12 +741,50 @@ void TxController::updateChannelSearch() {
         Serial.println(radioChannelManager.currentChannel());
     }
 
-    // Repeat the same persistent DATA frame while searching.
     if ((long)(millis() - nextSearchTxAt_) >= 0) {
         nextSearchTxAt_ = millis() + TX_SEARCH_REPEAT_MS;
 
         Serial.println("[TX][CHANNEL] Repeating pending DATA");
 
         sendCurrentData();
+    }
+}
+
+void TxController::sendHeartbeat() {
+
+    lastHeartbeatAt_ = millis();
+
+    RadioMessage heartbeat;
+
+    heartbeat.type = RADIO_MSG_HEARTBEAT;
+    heartbeat.senderId = TX_NODE_ID;
+    heartbeat.destinationId = RX_NODE_ID;
+    heartbeat.messageId = 0;
+    heartbeat.payload = "PING";
+
+    String plaintext;
+    String encryptedFrame;
+
+    if (!encodeRadioMessage(heartbeat, plaintext) ||
+        !encryptPacket(plaintext, encryptedFrame)) {
+        return;
+    }
+
+    radio.standby();
+    operationDone = false;
+
+    heartbeatTx_ = true;
+
+    transmissionState_ = radio.startTransmit(encryptedFrame);
+
+    if (transmissionState_ == RADIOLIB_ERR_NONE) {
+
+        transmitFlag_ = true;
+        dataTxStartedAt_ = millis();
+
+    } else {
+
+        heartbeatTx_ = false;
+        radio.startReceive();
     }
 }

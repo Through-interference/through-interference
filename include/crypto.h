@@ -24,7 +24,8 @@ CryptoPacketStatus cryptoDecryptBytes(
     size_t payloadCapacity,
     size_t& payloadLength,
     uint32_t& senderIdOut,
-    uint64_t& counterOut
+    uint64_t& counterOut,
+    bool persistCounter = true
 );
 
 bool encryptPacket(const String& plain, String& frame);
@@ -33,7 +34,13 @@ CryptoPacketStatus decryptPacketEx(
     const String& frame,
     String& plain,
     uint32_t& senderId,
-    uint64_t& counter
+    uint64_t& counter,
+    bool persistCounter = true
 );
 
+bool cryptoCommitRxCounter(uint64_t counter);
+
 bool decryptPacket(const String& frame, String& plain);
+
+// Обновление AES-128 ключа (16 байт) на лету
+bool cryptoUpdateKey(const uint8_t newKey[16]);
