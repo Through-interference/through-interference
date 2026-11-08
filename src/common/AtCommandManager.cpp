@@ -5,7 +5,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#define FW_VERSION "1.2.0-BPLA"
+#define FW_VERSION "2.0.0-CAN"
 
 namespace {
 
@@ -158,18 +158,25 @@ void AtCommandManager::processInput() {
         char c = static_cast<char>(_port.read());
 
         if (c == '\n' || c == '\r') {
-            if (_rxLine.length() > 0) {
+            if (_lineOverflow) {
+                _port.println("ERROR: LINE_TOO_LONG");
+                _lineOverflow = false;
+                _rxLine = "";
+            } else if (_rxLine.length() > 0) {
                 handleLine(_rxLine);
                 _rxLine = "";
             }
         } else if (_rxLine.length() < 120) {
             _rxLine += c;
+        } else {
+            _lineOverflow = true;
         }
     }
 }
 
 void AtCommandManager::handleLine(String line) {
     line.trim();
+    if (_extension && _extension(_context, line, _port)) return;
     String upper = line;
     upper.toUpperCase();
 
@@ -345,13 +352,14 @@ void AtCommandManager::handleLine(String line) {
 
     // 4. Управление железом (Hardware)
     if (upper.startsWith("CANBAUD ")) {
-        uint32_t baud = (uint32_t)line.substring(8).toInt();
-        if (!applyCanBaud(baud)) {
+        long parsed;
+        if (!parseLongStrict(line.substring(8), parsed) || parsed < 0 ||
+            !applyCanBaud(static_cast<uint32_t>(parsed))) {
             _port.println("ERROR: UNSUPPORTED_CAN_BAUD");
             return;
         }
         xSemaphoreTake(_mutex, portMAX_DELAY);
-        _cfg.canBaud = baud;
+        _cfg.canBaud = static_cast<uint32_t>(parsed);
         xSemaphoreGive(_mutex);
         _port.println("OK");
         return;
@@ -389,18 +397,7 @@ void AtCommandManager::handleLine(String line) {
     }
 
     if (upper.startsWith("CMD:") || upper.startsWith("SEND ")) {
-        String payload = upper.startsWith("SEND ") ? line.substring(5) : line;
-        payload.trim();
-        
-        xSemaphoreTake(_mutex, portMAX_DELAY);
-        if (_cmdCount < 8) {
-            _cmdQueue[_cmdTail] = payload;
-            _cmdTail = (_cmdTail + 1) % 8;
-            _cmdCount++;
-        }
-        xSemaphoreGive(_mutex);
-        
-        _port.println("OK");
+        _port.println("ERROR: TEXT_COMMANDS_UNSUPPORTED_USE_CAN_TX");
         return;
     }
 
@@ -435,8 +432,7 @@ bool AtCommandManager::applyCanBaud(uint32_t baud) {
     if (baud != 125000 && baud != 250000 && baud != 500000 && baud != 1000000) {
         return false;
     }
-    // Здесь вызывается реинициализация драйвера TWAI (CAN) на нужную скорость
-    return true;
+    return _canBaud && _canBaud(_context, baud);
 }
 
 bool AtCommandManager::parseHexKey(const String& hexStr, uint8_t* outKey) {

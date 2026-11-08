@@ -13,6 +13,8 @@ import queue
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+from tools.can_client import CanFrame, UsbReceiver, encode_frame
+from tools.canable import Canable
 
 try:
     import serial
@@ -24,7 +26,7 @@ except ImportError:
 class BplaGcsApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("НСУ БПЛА — Панель управления дроном и радиоканалом (ESP32 SX1262)")
+        self.root.title("НСУ — CAN-телеметрия и радиоканал ESP32 SX1262")
         
         # Делаем приложение на полный экран / развернутым по умолчанию
         # root.state('zoomed') работает на Windows/Linux, на macOS иногда нужен zoom
@@ -40,6 +42,16 @@ class BplaGcsApp:
         self.alive = False
         self.rx_queue: queue.Queue[str] = queue.Queue()
         self.tx_lock = threading.Lock()
+        self.can_receiver = UsbReceiver()
+        self.var_can_id = tk.StringVar(value="123")
+        self.var_can_data = tk.StringVar(value="")
+        self.var_can_extended = tk.BooleanVar(value=False)
+        self.var_can_remote = tk.BooleanVar(value=False)
+        self.var_can_dlc = tk.StringVar(value="0")
+        self.var_can_received = tk.StringVar(value="CAN-кадры ещё не получены")
+        self.var_air_received = tk.StringVar(value="На CAN борта ещё нет принятых команд")
+        self.var_canable_baud = tk.StringVar(value="500000")
+        self._canable = None
 
         # Автоопрос телеметрии
         self.auto_poll_var = tk.BooleanVar(value=False)
@@ -72,7 +84,7 @@ class BplaGcsApp:
         self.var_mod = tk.StringVar(value="LORA_SF9")
         self.var_slot = tk.StringVar(value="0")
         self.var_fhss = tk.BooleanVar(value=True)
-        self.var_key = tk.StringVar(value="2B7E151628AED2A6ABF7158809CF4F3C")
+        self.var_key = tk.StringVar(value="")
         self.var_custom_cmd = tk.StringVar()
 
         # Переменные полетных команд дрона
@@ -92,6 +104,7 @@ class BplaGcsApp:
         # Периодические задачи GUI
         self.root.after(50, self._process_rx_queue)
         self.root.after(2000, self._auto_poll_telemetry)
+        self.root.protocol("WM_DELETE_WINDOW", self.close_application)
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -141,7 +154,6 @@ class BplaGcsApp:
         grid_cur = [
             ("Прайм частота:", self.var_cur_prim, "Резерв:", self.var_cur_back),
             ("Мощность (TX):", self.var_cur_pwr, "Модуляция:", self.var_cur_mod),
-            ("TDMA слот:", self.var_cur_slot, "ППРЧ (FHSS):", self.var_cur_fhss),
         ]
         
         for r, (l1, v1, l2, v2) in enumerate(grid_cur):
@@ -161,7 +173,7 @@ class BplaGcsApp:
             ("Сигнал (RSSI):", self.var_rssi),
             ("Сигнал/шум (SNR):", self.var_snr),
             ("Радиоканал:", self.var_channel),
-            ("Последний ACK:", self.var_last_ack),
+            ("В очереди USB:", self.var_last_ack),
             ("Пакеты:", self.var_tx_rx_stat),
             ("Прошивка:", self.var_fw_ver),
         ]
@@ -201,12 +213,7 @@ class BplaGcsApp:
         ttk.Combobox(cfg_frame, textvariable=self.var_mod, values=["LORA_SF9", "LORA_SF7", "GFSK250", "GFSK100"], width=9, state="readonly").grid(row=3, column=1, sticky=tk.E, pady=3)
         ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"MOD {self.var_mod.get().strip()}")).grid(row=3, column=2, padx=2)
 
-        ttk.Label(cfg_frame, text="TDMA Слот:").grid(row=4, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(cfg_frame, textvariable=self.var_slot, values=["0", "1", "2", "3"], width=9, state="readonly").grid(row=4, column=1, sticky=tk.E, pady=3)
-        ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"SLOT {self.var_slot.get().strip()}")).grid(row=4, column=2, padx=2)
-
-        ttk.Checkbutton(cfg_frame, text="ППРЧ (FHSS)", variable=self.var_fhss).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=3)
-        ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"FHSS {'1' if self.var_fhss.get() else '0'}")).grid(row=5, column=2, padx=2)
+        ttk.Label(cfg_frame, text="Параметры радио задаются на обеих платах.", wraplength=300).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
 
         ttk.Label(cfg_frame, text="AES-128 (32 HEX):").grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(4, 1))
         ttk.Entry(cfg_frame, textvariable=self.var_key, font=("Monospace", 9)).grid(row=7, column=0, columnspan=3, sticky=tk.EW, pady=2)
@@ -222,22 +229,27 @@ class BplaGcsApp:
         cfg_frame.columnconfigure(1, weight=1)
 
         # --- ПРАВАЯ КОЛОНКА ---
-        drone_notebook = ttk.Notebook(right_col)
-        drone_notebook.pack(fill=tk.X, pady=(0, 6))
+        can_frame = ttk.LabelFrame(right_col, text=" CAN: компьютер ↔ БВС ", padding=8)
+        can_frame.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(can_frame, text="CAN ID (HEX)").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(can_frame, textvariable=self.var_can_id, width=12).grid(row=1, column=0, padx=3, sticky=tk.EW)
+        ttk.Label(can_frame, text="Данные (0–8 байт HEX)").grid(row=0, column=1, sticky=tk.W)
+        ttk.Entry(can_frame, textvariable=self.var_can_data, width=28).grid(row=1, column=1, padx=3, sticky=tk.EW)
+        ttk.Button(can_frame, text="Отправить CAN", command=self.send_can_frame).grid(row=1, column=2, padx=3)
+        ttk.Checkbutton(can_frame, text="29-битный ID", variable=self.var_can_extended).grid(row=2, column=0, sticky=tk.W)
+        ttk.Checkbutton(can_frame, text="RTR", variable=self.var_can_remote).grid(row=2, column=1, sticky=tk.W)
+        ttk.Spinbox(can_frame, from_=0, to=8, textvariable=self.var_can_dlc, width=4).grid(row=2, column=2)
+        ttk.Label(can_frame, textvariable=self.var_can_received, font=("Monospace", 10), wraplength=650).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=8)
+        ttk.Label(can_frame, text="Передаются исходные CAN-кадры. Результат выполнения команды приходит от БВС.", wraplength=650).grid(row=4, column=0, columnspan=3, sticky=tk.W)
+        self.btn_canable = ttk.Button(can_frame, text="Подключить CANable", command=self.toggle_canable)
+        self.btn_canable.grid(row=5, column=0, sticky=tk.EW, pady=(12, 4))
+        ttk.Combobox(can_frame, textvariable=self.var_canable_baud, values=['125000', '250000', '500000', '1000000'], state='readonly', width=12).grid(row=5, column=1, sticky=tk.W, padx=4)
+        ttk.Button(can_frame, text="Отправить с борта (CANable)", command=self.send_canable_frame).grid(row=5, column=2, padx=3)
+        ttk.Label(can_frame, textvariable=self.var_air_received, font=("Monospace", 10), wraplength=650).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=4)
+        ttk.Label(can_frame, text="Режим стенда: CANable заменяет БВС и показывает принятые на борту CAN-кадры.", wraplength=650).grid(row=7, column=0, columnspan=3, sticky=tk.W)
+        can_frame.columnconfigure(1, weight=1)
 
-        tab_flight = ttk.Frame(drone_notebook, padding=8)
-        tab_nav = ttk.Frame(drone_notebook, padding=8)
-        tab_payload = ttk.Frame(drone_notebook, padding=8)
-
-        drone_notebook.add(tab_flight, text=" 1. Взлёт / Режимы ")
-        drone_notebook.add(tab_nav, text=" 2. Навигация ")
-        drone_notebook.add(tab_payload, text=" 3. Нагрузка ")
-
-        self._build_tab_flight(tab_flight)
-        self._build_tab_nav(tab_nav)
-        self._build_tab_payload(tab_payload)
-
-        manual_frame = ttk.LabelFrame(right_col, text=" Ручной ввод команды (CMD:... или AT) ", padding=6)
+        manual_frame = ttk.LabelFrame(right_col, text=" Сервисная команда модему ", padding=6)
         manual_frame.pack(fill=tk.X, pady=(0, 6))
         entry_cmd = ttk.Entry(manual_frame, textvariable=self.var_custom_cmd, font=("Monospace", 10))
         entry_cmd.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
@@ -343,7 +355,7 @@ class BplaGcsApp:
         self.send_line(f"CMD:GOTO:{lat},{lon},{alt}")
 
     def refresh_ports(self):
-        ports = [p.device for p in serial.tools.list_ports.comports()]
+        ports = [p.device for p in serial.tools.list_ports.comports() if p.vid is not None or "usb" in p.device.lower()]
         for fallback in ("/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2"):
             if os.path.exists(fallback) and fallback not in ports:
                 ports.append(fallback)
@@ -358,7 +370,12 @@ class BplaGcsApp:
     def connect_serial(self):
         port, baud = self.var_port.get().strip(), int(self.var_baud.get())
         try:
-            self.ser = serial.Serial(port=port, baudrate=baud, timeout=0.1)
+            self.ser = serial.Serial(port=None, baudrate=baud, timeout=0.1, write_timeout=1, exclusive=True)
+            self.ser.dtr = False
+            self.ser.rts = False
+            self.ser.port = port
+            self.ser.open()
+            self.can_receiver = UsbReceiver()
             self.alive = True
             threading.Thread(target=self._serial_reader_loop, daemon=True).start()
             self.var_conn_status.set(f"ПОДКЛЮЧЕНО ({port})")
@@ -366,11 +383,13 @@ class BplaGcsApp:
             self.btn_connect.config(text="Отключить")
             self.append_log(f"--- Открыт порт {port} @ {baud} бод ---", "info")
             # Сразу после подключения запрашиваем конфиг с платы
-            self.send_line("CFG")
+            self.root.after(1500, self._initialize_modem)
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось открыть {port}:\n{e}")
 
     def disconnect_serial(self):
+        if self.alive:
+            self.send_line("CAN CLOSE")
         self.alive = False
         if self.ser:
             try: self.ser.close()
@@ -387,7 +406,12 @@ class BplaGcsApp:
                 raw = self.ser.readline()
                 if raw:
                     line = raw.decode("utf-8", errors="replace").strip()
-                    if line: self.rx_queue.put(line)
+                    if line:
+                        ack = self.can_receiver.feed(line)
+                        if ack:
+                            with self.tx_lock:
+                                self.ser.write((ack + "\r\n").encode("ascii"))
+                        self.rx_queue.put(line)
             except Exception as e:
                 self.rx_queue.put(f"[ERROR] Потеря связи: {e}")
                 self.alive = False
@@ -401,9 +425,76 @@ class BplaGcsApp:
             try:
                 self.ser.write((clean + "\r\n").encode("utf-8"))
                 self.ser.flush()
-                self.append_log(f">> {clean}", "tx_cmd")
+                self.rx_queue.put(f">> {clean}")
             except Exception as e:
-                self.append_log(f"[ERROR] Ошибка отправки: {e}", "error")
+                self.rx_queue.put(f"[ERROR] Ошибка отправки: {e}")
+
+    def _initialize_modem(self):
+        if self.alive:
+            for command in ("VER", "CFG", "CAN OPEN", "CAN STAT"):
+                self.send_line(command)
+
+    def send_can_frame(self):
+        frame = self._input_can_frame()
+        if frame is not None:
+            self.send_line("CAN TX " + encode_frame(frame))
+
+    def _input_can_frame(self):
+        try:
+            data = bytes.fromhex(self.var_can_data.get())
+            frame = CanFrame(int(self.var_can_id.get(), 16), data,
+                             self.var_can_extended.get(), self.var_can_remote.get(),
+                             int(self.var_can_dlc.get()) if self.var_can_remote.get() else None)
+        except ValueError as exc:
+            messagebox.showerror("CAN-кадр", str(exc))
+            return None
+        return frame
+
+    def toggle_canable(self):
+        if self._canable is not None:
+            driver = self._canable
+            self._canable = None
+            driver.close()
+            self.btn_canable.config(text="Подключить CANable")
+            self.append_log("CANable отключён", "info")
+            return
+        try:
+            driver = Canable(int(self.var_canable_baud.get()))
+        except Exception as exc:
+            messagebox.showerror("CANable", str(exc))
+            return
+        self._canable = driver
+        self.btn_canable.config(text="Отключить CANable")
+        threading.Thread(target=self._canable_reader_loop, args=(driver,), daemon=True).start()
+        self.append_log("CANable подключён как CAN-узел стенда", "info")
+
+    def _canable_reader_loop(self, driver):
+        while self._canable is driver:
+            try:
+                frame = driver.read(.1)
+                if frame is not None:
+                    self.rx_queue.put("[CANable RX] " + encode_frame(frame))
+            except Exception as exc:
+                self.rx_queue.put("[ERROR] CANable: " + str(exc))
+                break
+
+    def send_canable_frame(self):
+        if self._canable is None:
+            messagebox.showinfo("CANable", "Сначала подключите CANable кнопкой в панели CAN.")
+            return
+        frame = self._input_can_frame()
+        if frame is not None:
+            try:
+                self._canable.send(frame)
+                self.append_log(">> CANable TX " + encode_frame(frame), "tx_cmd")
+            except Exception as exc:
+                messagebox.showerror("CANable", str(exc))
+
+    def close_application(self):
+        self.disconnect_serial()
+        if self._canable is not None:
+            self.toggle_canable()
+        self.root.destroy()
 
     def send_custom_command(self):
         cmd = self.var_custom_cmd.get().strip()
@@ -412,20 +503,36 @@ class BplaGcsApp:
             self.var_custom_cmd.set("")
 
     def _process_rx_queue(self):
-        while not self.rx_queue.empty():
+        for _ in range(200):
+            if self.rx_queue.empty(): break
             line = self.rx_queue.get_nowait()
             self._parse_telemetry_line(line)
+            if line.startswith("[CANable RX] "):
+                self.var_air_received.set("На CAN борта принято " + line[len("[CANable RX] "):])
             tag = None
             if "ACK matched" in line or "Connection restored" in line or "OK" == line: tag = "ack_ok"
             elif "timeout" in line.lower() or "degraded" in line.lower() or "searching" in line.lower(): tag = "warn"
             elif "error" in line.lower() or "fail" in line.lower() or "blocked" in line.lower(): tag = "error"
             elif line.startswith("+"): tag = "info"
             self.append_log(line, tag)
+        for _ in range(200):
+            frame = self.can_receiver.read()
+            if frame is None: break
+            self.var_can_received.set("Получен " + encode_frame(frame))
         if not self.alive and self.btn_connect["text"] == "Отключить":
             self.disconnect_serial()
         self.root.after(50, self._process_rx_queue)
 
     def _parse_telemetry_line(self, line: str):
+        if line.startswith("+READY: GROUND"):
+            self.send_line("CAN OPEN")
+        if line.startswith("+CAN LINK "):
+            self.var_link_state.set(line.rsplit(" ", 1)[-1])
+        if line.startswith("+CAN STAT: "):
+            fields = dict(part.split("=", 1) for part in line[len("+CAN STAT: "):].split(",") if "=" in part)
+            self.var_link_state.set(fields.get("LINK", "UNKNOWN"))
+            self.var_last_ack.set(fields.get("USB_PENDING", "—"))
+            self.var_tx_rx_stat.set(f"RF TX: {fields.get('RF_TX', '0')} | RX: {fields.get('RF_RX', '0')}")
         # Парсинг стандартной телеметрии
         m_rssi = re.search(r"RSSI:\s*([-\d.]+)\s*dBm", line)
         if m_rssi: self.var_rssi.set(f"{m_rssi.group(1)} dBm")
@@ -483,6 +590,9 @@ class BplaGcsApp:
         threading.Thread(target=_poll, daemon=True).start()
 
     def _auto_poll_telemetry(self):
+        if self.alive:
+            self.send_line("CAN OPEN")
+            self.send_line("CAN STAT")
         if self.alive and self.auto_poll_var.get():
             self.poll_telemetry_once()
         self.root.after(2000, self._auto_poll_telemetry)
@@ -500,6 +610,16 @@ class BplaGcsApp:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="CAN-телеметрия ESP32")
+    parser.add_argument('--connect', help='автоматически подключить наземный USB-порт')
+    parser.add_argument('--canable', action='store_true', help='включить CANable как CAN-узел стенда')
+    args = parser.parse_args()
     root = tk.Tk()
     app = BplaGcsApp(root)
+    if args.connect:
+        app.var_port.set(args.connect)
+        root.after(300, app.connect_serial)
+    if args.canable:
+        root.after(2200, app.toggle_canable)
     root.mainloop()

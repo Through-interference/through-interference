@@ -5,7 +5,6 @@
 #include <mbedtls/gcm.h>
 #include <stdint.h>
 #include <string.h>
-#include "crypto_secrets.h"
 #include "AtCommandManager.h"
 
 // Максимум полезных данных в одном пакете.
@@ -30,9 +29,9 @@ static uint64_t txBlockEnd = 0;
 static uint64_t lastRxCounter = 0;
 static uint64_t lastPersistedRxCounter = 0;
 
-// При резервировании сохраняем сразу 32 значения.
+// Reserve a large durable TX block; idle polling must not wear flash every second.
 // После перезапуска неиспользованный остаток блока пропускается.
-static const uint64_t TX_COUNTER_BLOCK_SIZE = 32ULL;
+static const uint64_t TX_COUNTER_BLOCK_SIZE = 65536ULL;
 
 static const size_t NONCE_SIZE = 12;
 static const size_t TAG_SIZE = 16;
@@ -177,16 +176,16 @@ bool cryptoInit() {
 
     // Проверяем, есть ли сохраненный ключ в NVS от AtCommandManager (профиль bind.py)
     Preferences cfgPrefs;
-    uint8_t activeKey[16];
+    uint8_t activeKey[16] = {};
     bool hasCustomKey = false;
 
     if (cfgPrefs.begin("modem_cfg", true)) {
-        if (cfgPrefs.isKey("cfg_blob")) {
-            ModemConfig tempCfg;
-            cfgPrefs.getBytes("cfg_blob", &tempCfg, sizeof(ModemConfig));
+        if (cfgPrefs.getBytesLength("cfg_blob") == sizeof(ModemConfig)) {
+            ModemConfig tempCfg = {};
+            const size_t read = cfgPrefs.getBytes("cfg_blob", &tempCfg, sizeof(ModemConfig));
             // Проверяем, не нулевой ли ключ
             for (int i = 0; i < 16; i++) {
-                if (tempCfg.aesKey[i] != 0) {
+                if (read == sizeof(ModemConfig) && tempCfg.aesKey[i] != 0) {
                     hasCustomKey = true;
                     break;
                 }
@@ -201,7 +200,7 @@ bool cryptoInit() {
     // Если через bind.py ключ еще не задавался, берем заглушку и предупреждаем
     if (!hasCustomKey) {
         Serial.println("[CRITICAL] WARNING: No AES key found in NVS! Run bind.py to configure encryption.");
-        memcpy(activeKey, DEFAULT_UNBOUND_AES_KEY, 16);
+        // The controller blocks RF until a nonzero paired key is configured.
     } else {
         Serial.println("[CRYPTO] Loaded secure AES-128 key from NVS profile.");
     }
