@@ -48,6 +48,8 @@ exit
 
 Windows подключается к USB наземного ESP32, Mac с CANable подключается к CAN борта. На Windows запустить `start-ground.bat`, на Mac `start-air.command`. На обеих сторонах команда `send 00010203` отправляет данные на другой компьютер. Пошаговая схема и ожидаемые строки приёма: [TWO_COMPUTERS.md](docs/TWO_COMPUTERS.md).
 
+На Linux для USB наземного ESP32 запустить `./start-ground.sh`. Скрипт сам создаёт окружение и устанавливает pyserial. Инструкция и доступ к USB-порту: [LINUX.md](docs/LINUX.md).
+
 ## Развёртывание из чистого checkout
 
 Нужен Python 3.10+ с Tk для панели, USB serial-драйвер для конкретной платы, PlatformIO. Для CANable на macOS нужен libusb.
