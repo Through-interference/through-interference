@@ -61,6 +61,10 @@ public:
     void retryPendingConfig();
     bool saveToNvs();
     ModemConfig getCurrentConfig();
+    typedef bool (*ExtensionHandler)(void*, const String&, Stream&);
+    typedef bool (*CanBaudHandler)(void*, uint32_t);
+    void setExtensionHandler(ExtensionHandler handler, void* context) { _extension = handler; _context = context; }
+    void setCanBaudHandler(CanBaudHandler handler) { _canBaud = handler; }
 
 private:
     Stream& _port;
@@ -77,6 +81,10 @@ private:
     ModemTelemetry _telem;
     volatile bool _configDirty = false;
     String _rxLine;
+    bool _lineOverflow = false;
+    ExtensionHandler _extension = nullptr;
+    CanBaudHandler _canBaud = nullptr;
+    void* _context = nullptr;
 
     void handleLine(String line);
     void loadFromNvs();

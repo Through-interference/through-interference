@@ -4,3 +4,8 @@
 .vscode/launch.json
 .vscode/ipch
 crypto_secrets.h
+.venv/
+.console-venv/
+__pycache__/
+*.pyc
+.superpowers/
