@@ -1,6 +1,29 @@
 #include "CanHardware.h"
 #include <Arduino.h>
 #include <string.h>
+#include <driver/gpio.h>
+#include <soc/gpio_struct.h>
+#include <soc/gpio_sig_map.h>
+#include <soc/twai_struct.h>
+
+void CanHardware::diagnostics(Stream& port) const {
+    twai_status_info_t s = {};
+    const esp_err_t result = twai_get_status_info(&s);
+    if (!installed_ || result != ESP_OK) {
+        port.printf("ERROR: CAN_DIAG_NOT_STARTED=%d\r\n", static_cast<int>(result));
+        return;
+    }
+    port.printf("+CAN DIAG: BAUD=%lu,TX_PIN=4,RX_PIN=17,STATE=%u,TEC=%lu,REC=%lu,HW_TX_FAIL=%lu,BUS_ERRORS=%lu,ARB_LOST=%lu,RX_LEVEL=%d,RX_ROUTE=%u,TX_ROUTE=%u,TX_ENABLE=%u,MODE=%02lX,STATUS=%02lX,BTR0=%02lX,BTR1=%02lX\r\nOK\r\n",
+        static_cast<unsigned long>(bitrate_), static_cast<unsigned>(s.state),
+        static_cast<unsigned long>(s.tx_error_counter), static_cast<unsigned long>(s.rx_error_counter),
+        static_cast<unsigned long>(s.tx_failed_count), static_cast<unsigned long>(s.bus_error_count),
+        static_cast<unsigned long>(s.arb_lost_count), gpio_get_level(GPIO_NUM_17),
+        static_cast<unsigned>(GPIO.func_in_sel_cfg[TWAI_RX_IDX].func_sel),
+        static_cast<unsigned>(GPIO.func_out_sel_cfg[4].func_sel),
+        static_cast<unsigned>((GPIO.enable >> 4) & 1U),
+        static_cast<unsigned long>(TWAI.mode_reg.val), static_cast<unsigned long>(TWAI.status_reg.val),
+        static_cast<unsigned long>(TWAI.bus_timing_0_reg.val), static_cast<unsigned long>(TWAI.bus_timing_1_reg.val));
+}
 
 bool CanHardware::begin(uint32_t bitrate) {
     twai_timing_config_t timing;

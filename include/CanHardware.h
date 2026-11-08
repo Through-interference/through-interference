@@ -2,11 +2,13 @@
 #include "CanProtocol.h"
 #include "ReliableEndpoint.h"
 #include <driver/twai.h>
+class Stream;
 
 class CanHardware : public canlink::FrameSink {
 public:
     bool begin(uint32_t bitrate);
     bool changeBitrate(uint32_t bitrate);
+    void diagnostics(Stream& port) const;
     bool accept(const canlink::CanFrame* frames, size_t count) override;
     void update(canlink::ReliableEndpoint& endpoint);
     size_t pending() const { return tx_.size(); }

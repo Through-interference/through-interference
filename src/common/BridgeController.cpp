@@ -199,6 +199,11 @@ bool BridgeController::canBaud(void* context, uint32_t bitrate) {
 }
 bool BridgeController::command(const String& line, Stream& port) {
     if (!line.startsWith("CAN ")) return false;
+    if (line == "CAN DIAG") {
+        if (airborne_) can_.diagnostics(port);
+        else port.println("ERROR: CAN_DIAG_AIR_ONLY");
+        return true;
+    }
     if (line == "CAN STAT") {
         port.printf("+CAN STAT: ROLE=%s,OPEN=%u,LINK=%s,PEER_READY=%u,TX_PENDING=%u,USB_PENDING=%u,USB_RX=%lu,CAN_RX=%lu,CAN_TX=%lu,CAN_PENDING=%u,CAN_DROP=%lu,CAN_FAIL=%lu,BUS_OFF=%lu,RF_TX=%lu,RF_RX=%lu,RF_TIMEOUT=%lu,RF_BAD=%lu,QUEUE_REJECT=%lu,UNCERTAIN=%lu\r\nOK\r\n",
             airborne_ ? "AIR" : "GROUND", usbOpen_, connected_ ? "UP" : "DOWN", peerReady_,

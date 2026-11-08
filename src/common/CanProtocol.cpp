@@ -85,7 +85,7 @@ bool formatCanFrame(const CanFrame& f, char* out, size_t capacity) {
 }
 bool encodePacket(const Packet& p, uint8_t* out, size_t capacity, size_t& length) {
     length = 0;
-    if (!out || !validPacket(p) || capacity < 36 + 14 * p.count) return false;
+    if (!out || !validPacket(p) || capacity < 36U + 14U * p.count) return false;
     out[0] = 2; out[1] = static_cast<uint8_t>(p.kind);
     put64(out + 2, p.session); put32(out + 10, p.sequence);
     put64(out + 14, p.destinationSession);
@@ -101,7 +101,7 @@ bool encodePacket(const Packet& p, uint8_t* out, size_t capacity, size_t& length
 }
 bool decodePacket(const uint8_t* input, size_t length, Packet& packet) {
     if (!input || length < 36 || input[0] != 2 || input[34] > BatchSize || input[35] > 1 ||
-        length != 36 + 14 * input[34]) return false;
+        length != 36U + 14U * input[34]) return false;
     Packet p; p.kind = static_cast<PacketKind>(input[1]);
     p.session = get64(input + 2); p.sequence = get32(input + 10);
     p.destinationSession = get64(input + 14);

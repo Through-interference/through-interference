@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 task_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec "$task_root/start-console.command" --role air "$@"
+exec "$task_root/start-console.sh" --role air "$@"

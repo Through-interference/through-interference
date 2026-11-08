@@ -10,11 +10,25 @@ import queue
 import struct
 import threading
 import time
+import sys
 
 from tools.can_client import CanFrame, CanModem, encode_frame
 
 
 from tools.canable import Canable
+
+
+def finish_report(report, path, closers):
+    active_error = sys.exc_info()[0] is not None
+    for name, close in closers:
+        try:
+            close()
+        except Exception as exc:
+            report.setdefault('cleanup_errors', []).append(f'{name}: {type(exc).__name__}: {exc}')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+    if report.get('cleanup_errors') and not active_error:
+        raise RuntimeError('Cleanup failed; see cleanup_errors in ' + str(path))
 
 
 def configure_port(port, commands):
@@ -64,6 +78,7 @@ def main():
     parser.add_argument('--ground-port', required=True)
     parser.add_argument('--air-port', required=True)
     parser.add_argument('--bitrate', type=int, default=500000)
+    parser.add_argument('--can-channel', help='Linux SocketCAN interface, default can0')
     parser.add_argument('--modulation', choices=['GFSK100', 'GFSK250', 'LORA_SF7', 'LORA_SF9'])
     parser.add_argument('--burst', type=int, default=24)
     parser.add_argument('--output', type=Path, required=True)
@@ -74,7 +89,7 @@ def main():
         if args.modulation:
             for role, port in [('air', args.air_port), ('ground', args.ground_port)]:
                 report[role + '_setup'] = configure_port(port, ['MOD ' + args.modulation, 'SAVE', 'VER', 'CFG'])
-        canable = Canable(args.bitrate)
+        canable = Canable(args.bitrate, channel=args.can_channel) if args.can_channel else Canable(args.bitrate)
         with CanModem(args.ground_port, capacity=4096) as modem:
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -136,10 +151,7 @@ def main():
         report['errors'].append(f'{type(exc).__name__}: {exc}')
         raise
     finally:
-        if canable:
-            canable.close()
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+        finish_report(report, args.output, [('CAN', canable.close)] if canable else [])
 
 
 if __name__ == '__main__':
