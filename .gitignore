@@ -9,3 +9,6 @@ crypto_secrets.h
 __pycache__/
 *.pyc
 .superpowers/
+docs/superpowers/
+.DS_Store
+*.command

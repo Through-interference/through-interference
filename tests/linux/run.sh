@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cp /source/*.sh /source/requirements*.txt /source/gcs_panel.py /source/bind.py /tmp/can-demo/
+cp /source/*.sh /source/requirements*.txt /source/gcs_panel.py /tmp/can-demo/
 cp -r /source/tools /source/tests /source/include /source/src /tmp/can-demo/
 cd /tmp/can-demo
 ./start-ground.sh --help
@@ -18,13 +18,4 @@ app = BplaGcsApp(root)
 root.after(200, root.destroy)
 root.mainloop()
 print('Linux GUI created and closed successfully')
-PY
-python3 - <<'PY'
-import socket
-try:
-    s = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
-    s.close()
-    print('AF_CAN available; real CAN interface is required for hardware tests')
-except OSError as exc:
-    print('Native CAN hardware/vcan not tested: Docker host kernel lacks AF_CAN:', exc)
 PY
