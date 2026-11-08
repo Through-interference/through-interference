@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 from tools.can_client import CanFrame, CanModem
-from tools.hardware_check import Canable, expect
+from tools.hardware_check import Canable, expect, finish_report
 
 
 class AirService:
@@ -54,13 +54,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ground-port', required=True)
     parser.add_argument('--air-port', required=True)
+    parser.add_argument('--can-channel', help='Linux SocketCAN interface, default can0')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     report = {'tests': [], 'errors': []}
     air = canable = None
+    profile_verified = False
     try:
         air = AirService(args.air_port)
-        canable = Canable()
+        ground = AirService(args.ground_port)
+        try:
+            configurations = [air.command('CFG'), ground.command('CFG')]
+        finally:
+            ground.close()
+        if not all(any('MOD=GFSK250' in line for line in config) for config in configurations):
+            raise RuntimeError('Recovery test requires GFSK250 on both boards; no profile was changed')
+        profile_verified = True
+        canable = Canable(channel=args.can_channel) if args.can_channel else Canable()
         with CanModem(args.ground_port, capacity=1) as modem:
             wait_link(modem)
             # Freeze physical radio reception without changing the saved profile.
@@ -145,12 +155,14 @@ def main():
         report['errors'].append(f'{type(exc).__name__}: {exc}')
         raise
     finally:
+        closers = []
+        if air and profile_verified:
+            closers.append(('restore air GFSK250', lambda: air.command('MOD GFSK250')))
         if canable:
-            canable.close()
+            closers.append(('CAN', canable.close))
         if air:
-            air.close()
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+            closers.append(('air USB', air.close))
+        finish_report(report, args.output, closers)
 
 
 if __name__ == '__main__':

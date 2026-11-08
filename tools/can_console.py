@@ -6,6 +6,8 @@ from datetime import datetime
 import re
 import threading
 import time
+import secrets
+import sys
 
 from tools.can_client import CanFrame, CanModem
 from tools.canable import Canable
@@ -46,7 +48,7 @@ def ground_port(explicit: str | None) -> str:
     if len(matches) == 1:
         return matches[0]
     available = ', '.join(f'{port.device}: {port.description}' for port in ports) or 'нет портов'
-    raise RuntimeError('Подключи только наземный ESP32 или укажи --port COM5. Найдены: ' + available)
+    raise RuntimeError('Укажи --port с портом наземного ESP32. Найдены: ' + available)
 
 
 def main(argv=None):
@@ -57,9 +59,20 @@ def main(argv=None):
     parser.add_argument('--id', default='123', help='CAN identifier in HEX, default 123')
     parser.add_argument('--extended', action='store_true')
     parser.add_argument('--bitrate', type=int, default=500000)
+    parser.add_argument('--can-channel', help='Linux SocketCAN interface, default can0')
+    parser.add_argument('--setup-can', action='store_true', help='configure SocketCAN if needed; may request sudo')
+    parser.add_argument('--list-ports', action='store_true', help='list USB serial ports and exit')
     parser.add_argument('--no-canable', action='store_true', help='only USB/radio, without the bench CANable peer')
     parser.add_argument('--demo', action='store_true', help='send one diagnostic frame each way, verify actual reception, then exit')
+    parser.add_argument('--demo-timeout', type=float, default=20, help='diagnostic round-trip deadline in seconds')
     args = parser.parse_args(argv)
+    if args.list_ports:
+        from serial.tools.list_ports import comports
+        for port in sorted(comports()):
+            print(f'{port.device}: {port.description} [{port.hwid}]')
+        return
+    if args.demo_timeout <= 0:
+        parser.error('--demo-timeout must be positive')
     if args.no_canable:
         if args.role == 'air':
             parser.error('--no-canable cannot be used with --role air')
@@ -104,11 +117,14 @@ def main(argv=None):
                     seen_condition.notify_all()
 
     try:
+        if args.role != 'ground' and args.setup_can and sys.platform.startswith('linux'):
+            from tools.socketcan import configure
+            configure(args.can_channel or 'can0', args.bitrate)
         if args.role != 'air':
             args.port = ground_port(args.port)
             modem = resources.enter_context(CanModem(args.port))
         if args.role != 'ground':
-            canable = Canable(args.bitrate)
+            canable = Canable(args.bitrate, channel=args.can_channel) if args.can_channel else Canable(args.bitrate)
             resources.callback(canable.close)
         receivers = ([(modem.read, 'КОМПЬЮТЕР ПОЛУЧИЛ')] if modem else [])
         receivers += [(canable.read, 'БОРТ ПОЛУЧИЛ')] if canable else []
@@ -122,13 +138,14 @@ def main(argv=None):
         if canable:
             output('CANable подключён вместо БВС. Строки ПОЛУЧИЛ означают фактический приём.')
         if args.demo:
-            down = payload_frame('0102030405060708', identifier, args.extended)
-            up = payload_frame('0807060504030201', identifier, args.extended)
+            nonce = secrets.token_bytes(7)
+            down = CanFrame(identifier, b'\x01' + nonce, extended=args.extended)
+            up = CanFrame(identifier, b'\x02' + nonce, extended=args.extended)
             modem.send(down)
             output(frame_text('КОМПЬЮТЕР ОТПРАВИЛ', down))
             canable.send(up)
             output(frame_text('БОРТ ОТПРАВИЛ', up))
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + args.demo_timeout
             with seen_condition:
                 while ('БОРТ ПОЛУЧИЛ', down) not in seen or ('КОМПЬЮТЕР ПОЛУЧИЛ', up) not in seen:
                     if errors:
@@ -183,7 +200,7 @@ def main(argv=None):
         if errors:
             raise RuntimeError(str(errors[0]))
     except KeyboardInterrupt:
-        pass
+        raise SystemExit(130)
     except Exception as exc:
         output('ОШИБКА: ' + str(exc))
         output('Если USB-порт занят, закрой панель и другие программы, использующие этот порт')

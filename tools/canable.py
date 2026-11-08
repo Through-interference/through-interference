@@ -2,10 +2,11 @@
 import queue
 import struct
 import threading
+import sys
 from tools.can_client import CanFrame
 
 
-class Canable:
+class GsUsbCanable:
     def __init__(self, bitrate=500000):
         from gs_usb.gs_usb import GsUsb
         from gs_usb.constants import GS_CAN_MODE_HW_TIMESTAMP
@@ -16,15 +17,21 @@ class Canable:
         self.stop = threading.Event()
         self.frames = queue.Queue(maxsize=4096)
         self.error = None
-        self.dev.stop()
-        if not self.dev.set_bitrate(bitrate):
-            raise RuntimeError('Unsupported CAN bitrate')
-        flags = GS_CAN_MODE_HW_TIMESTAMP & self.dev.device_capability.feature
-        self.dev.device_flags = flags
-        # Avoid the upstream macOS detach_kernel_driver path, which requires root.
-        self.dev.gs_usb.ctrl_transfer(0x41, 2, 0, 0, struct.pack('<II', 1, flags))
-        self.thread = threading.Thread(target=self._receive, daemon=True)
-        self.thread.start()
+        self.closed = False
+        try:
+            self.dev.stop()
+            if not self.dev.set_bitrate(bitrate):
+                raise RuntimeError('Unsupported CAN bitrate')
+            flags = GS_CAN_MODE_HW_TIMESTAMP & self.dev.device_capability.feature
+            self.dev.device_flags = flags
+            # Native Linux uses SocketCAN below. This is the macOS/Windows USB path.
+            self.dev.gs_usb.ctrl_transfer(0x41, 2, 0, 0, struct.pack('<II', 1, flags))
+            self.thread = threading.Thread(target=self._receive, daemon=True)
+            self.thread.start()
+        except BaseException:
+            import usb.util
+            usb.util.dispose_resources(self.dev.gs_usb)
+            raise
 
     def _receive(self):
         from gs_usb.gs_usb_frame import GsUsbFrame
@@ -48,6 +55,8 @@ class Canable:
             self.error = exc
 
     def send(self, frame):
+        if self.error:
+            raise self.error
         from gs_usb.gs_usb_frame import GsUsbFrame
         from gs_usb.constants import CAN_EFF_FLAG, CAN_RTR_FLAG
         raw = GsUsbFrame(can_id=frame.can_id | (CAN_EFF_FLAG if frame.extended else 0) |
@@ -65,7 +74,22 @@ class Canable:
 
     def close(self):
         import usb.util
+        if self.closed:
+            return
+        self.closed = True
         self.stop.set()
         self.thread.join(2)
-        self.dev.stop()
-        usb.util.dispose_resources(self.dev.gs_usb)
+        try:
+            self.dev.stop()
+        finally:
+            usb.util.dispose_resources(self.dev.gs_usb)
+
+
+def Canable(bitrate=500000, channel=None):
+    """Use the OS CAN driver on Linux; USB userspace transport elsewhere."""
+    if sys.platform.startswith('linux'):
+        from tools.socketcan import SocketCanable
+        return SocketCanable(bitrate, channel or 'can0')
+    if channel is not None:
+        raise ValueError('--can-channel доступен только для SocketCAN на Linux')
+    return GsUsbCanable(bitrate)

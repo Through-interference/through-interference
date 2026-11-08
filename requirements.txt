@@ -1,3 +1,2 @@
-pyserial==3.5
-gs-usb==0.3.1
+-r requirements-console.txt
 pymavlink==2.4.50
