@@ -21,7 +21,6 @@ bool TxOutbox::persistRecord() {
     if (prefs_.putUInt("out_mid", message_.messageId) != sizeof(uint32_t)) return false;
     if (prefs_.putUInt("out_src", message_.senderId) != sizeof(uint32_t)) return false;
     if (prefs_.putUInt("out_dst", message_.destinationId) != sizeof(uint32_t)) return false;
-    if (prefs_.putUInt("out_seq", message_.sequence) != sizeof(uint32_t)) return false;
     if (prefs_.putString("out_pay", message_.payload) == 0) return false;
     if (prefs_.putUChar("out_state", 1) != sizeof(uint8_t)) return false; // WAIT_ACK
     if (prefs_.putBool("active", true) != sizeof(bool)) return false;
@@ -105,97 +104,88 @@ void TxOutbox::fatal(const char* message) {
 
 bool TxOutbox::restore() {
     if (!prefs_.getBool("active", false)) {
-        message_.sequence = prefs_.getUInt("next_seq", 1);
         return false;
     }
 
     if (prefs_.getUChar("out_state", 0) != 1) {
-        fatal("[TX][FATAL] Outbox marked active but state is not WAIT_ACK");
+        fatal("[TX][FATAL] Invalid outbox state");
     }
 
     message_.messageId = prefs_.getUInt("out_mid", 0);
     message_.senderId = prefs_.getUInt("out_src", 0);
     message_.destinationId = prefs_.getUInt("out_dst", 0);
-    message_.sequence = prefs_.getUInt("out_seq", 0);
     message_.payload = prefs_.getString("out_pay", "");
 
-    if (message_.messageId == 0 || message_.senderId != TX_NODE_ID ||
-        message_.destinationId != RX_NODE_ID || message_.sequence == 0 ||
-        message_.sequence > TOTAL_MESSAGES || message_.payload.length() == 0) {
-        fatal("[TX][FATAL] Persistent outbox record is invalid; refusing to discard it");
+    if (message_.messageId == 0 ||
+        message_.senderId != TX_NODE_ID ||
+        message_.destinationId != RX_NODE_ID ||
+        message_.payload.length() == 0) {
+        fatal("[TX][FATAL] Invalid persistent outbox record");
+    }
+
+    // патом убрать!!!!!!
+    if (message_.payload.startsWith("TEST_SEQUENCE=")) {
+        Serial.println("[TX] Removing obsolete test message");
+
+        if (prefs_.putBool("active", false) != sizeof(bool)) {
+            fatal("[TX][FATAL] Cannot clear test message");
+        }
+
+        active_ = false;
+        return false;
     }
 
     active_ = true;
-    Serial.print("[TX] Restored pending transaction from NVS: messageId=");
-    Serial.print(message_.messageId);
-    Serial.print(" sequence=");
-    Serial.println(message_.sequence);
+    Serial.print("[TX] Restored pending command, messageId=");
+    Serial.println(message_.messageId);
 
     if (!buildEncryptedTransaction()) {
-        fatal("[TX][FATAL] Cannot reconstruct pending outbox transaction");
+        fatal("[TX][FATAL] Cannot restore encrypted transaction");
     }
     return true;
 }
 
-bool TxOutbox::create() {
-    if (!ready_) {
-        Serial.println("[TX][NVS] Cannot create: storage not ready");
+bool TxOutbox::create(const String& customPayload) {
+    if (!ready_ || active_ || customPayload.length() == 0) {
         return false;
     }
 
-    message_.sequence = prefs_.getUInt("next_seq", 1);
-
-    Serial.print("[TX][NVS] Next sequence: ");
-    Serial.println(message_.sequence);
-
-    if (message_.sequence > TOTAL_MESSAGES) return false;
-
     if (!allocateMessageId()) {
-        Serial.println("[TX][NVS] Message ID allocation failed");
         return false;
     }
 
     message_.senderId = TX_NODE_ID;
     message_.destinationId = RX_NODE_ID;
-    message_.payload = "TEST_SEQUENCE=" + String(message_.sequence);
+    message_.payload = customPayload;
 
     if (!persistRecord()) {
-        fatal("[TX][FATAL] Cannot persist outbox; message was not sent");
+        fatal("[TX][FATAL] Cannot persist drone command");
     }
 
     if (!buildEncryptedTransaction()) {
-        fatal("[TX][FATAL] Outbox saved but encryption failed");
+        fatal("[TX][FATAL] Cannot encrypt drone command");
     }
 
-    Serial.println("[TX] Outbox successfully created");
+    Serial.print("[TX] Drone command queued: ");
+    Serial.println(customPayload);
+
     return true;
 }
 
 bool TxOutbox::acknowledge() {
     if (!active_ || !ready_) return false;
 
-    const uint32_t nextSequence = message_.sequence + 1;
-    // Store next_seq first; clear active only after that write succeeds.
-    if (prefs_.putUInt("next_seq", nextSequence) != sizeof(nextSequence)) {
-        Serial.println("[TX] Cannot persist next sequence; keeping outbox pending");
-        return false;
-    }
     if (prefs_.putBool("active", false) != sizeof(bool)) {
-        Serial.println("[TX] Cannot clear outbox marker; keeping transaction pending");
+        Serial.println("[TX] Cannot clear outbox marker");
         return false;
     }
 
     active_ = false;
-    message_.sequence = nextSequence;
     return true;
 }
 
 bool TxOutbox::isActive() const {
     return active_;
-}
-
-uint32_t TxOutbox::sequence() const {
-    return message_.sequence;
 }
 
 uint32_t TxOutbox::messageId() const {

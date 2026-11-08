@@ -11,7 +11,8 @@
 enum RadioMessageType : uint8_t {
     RADIO_MSG_INVALID = 0,
     RADIO_MSG_DATA = 1,
-    RADIO_MSG_ACK = 2
+    RADIO_MSG_ACK = 2,
+    RADIO_MSG_HEARTBEAT = 3
 };
 
 struct RadioMessage {
@@ -41,17 +42,29 @@ inline bool protocolParseUInt32(const String& text, uint32_t& value) {
 inline bool encodeRadioMessage(const RadioMessage& message, String& output) {
     output = "";
 
-    if ((message.type != RADIO_MSG_DATA && message.type != RADIO_MSG_ACK) ||
+    const bool isHeartbeat =
+    message.type == RADIO_MSG_HEARTBEAT;
+
+    if ((message.type != RADIO_MSG_DATA &&
+        message.type != RADIO_MSG_ACK &&
+        !isHeartbeat) ||
         message.senderId == 0 ||
         message.destinationId == 0 ||
-        message.messageId == 0 ||
+        (isHeartbeat ? message.messageId != 0
+                    : message.messageId == 0) ||
         message.payload.length() == 0) {
         return false;
     }
 
     output.reserve(48 + message.payload.length());
     output = "V1|";
-    output += (message.type == RADIO_MSG_DATA) ? "DATA|" : "ACK|";
+    if (message.type == RADIO_MSG_DATA) {
+        output += "DATA|";
+    } else if (message.type == RADIO_MSG_ACK) {
+        output += "ACK|";
+    } else {
+        output += "HB|";
+    }
     output += String(message.senderId);
     output += '|';
     output += String(message.destinationId);
@@ -86,6 +99,8 @@ inline bool decodeRadioMessage(const String& input, RadioMessage& message) {
         message.type = RADIO_MSG_DATA;
     } else if (typeText == "ACK") {
         message.type = RADIO_MSG_ACK;
+    } else if (typeText == "HB") {
+        message.type = RADIO_MSG_HEARTBEAT;
     } else {
         return false;
     }
@@ -98,8 +113,16 @@ inline bool decodeRadioMessage(const String& input, RadioMessage& message) {
     }
 
     message.payload = input.substring(p5 + 1);
-    if (message.senderId == 0 || message.destinationId == 0 ||
-        message.messageId == 0 || message.payload.length() == 0) {
+    
+    const bool isHeartbeat =
+        message.type == RADIO_MSG_HEARTBEAT;
+
+    if (message.senderId == 0 ||
+        message.destinationId == 0 ||
+        (isHeartbeat ? message.messageId != 0
+                    : message.messageId == 0) ||
+        message.payload.length() == 0) {
+
         message.type = RADIO_MSG_INVALID;
         return false;
     }

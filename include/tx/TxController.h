@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "tx/TxOutbox.h"
+#include "AtCommandManager.h" // Нужно для структуры ModemConfig
 
 class TxController {
 public:
@@ -20,6 +21,9 @@ private:
     bool transmitFlag_ = false;
     int transmissionState_ = 0;
 
+    bool heartbeatTx_ = false;
+    unsigned long lastHeartbeatAt_ = 0;
+
     ConnectionState connectionState_ = CONNECTED;
     unsigned long recoveryStartedAt_ = 0;
     unsigned long totalRecoveryTimeMs_ = 0;
@@ -36,21 +40,22 @@ private:
     unsigned long ackTimer_ = 0;
     unsigned long dataTxStartedAt_ = 0;
 
-    bool nextDataPending_ = false;
-    unsigned long nextDataAt_ = 0;
-
     bool switchAfterAck_ = false;
     unsigned long nextSearchTxAt_ = 0;
 
-    void startNextData();
+    // Поля для смены модуляции по воздуху (OTA)
+    bool hasAppliedOnce_ = false;
+    uint8_t currentModulation_ = 0xFF;
+    bool pendingOtaModChange_ = false;
+    ModemConfig pendingOtaCfg_;
+
     void sendCurrentData();
     void handleRadioEvent();
     void handleReceivedAck();
     void handleTxWatchdog();
     void handleAckTimeout();
-    void handleScheduledData();
     void setConnectionState(ConnectionState nextState);
-    void printSummary();
     void startChannelSearch();
     void updateChannelSearch();
+    void sendHeartbeat();
 };

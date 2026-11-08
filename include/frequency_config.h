@@ -22,11 +22,13 @@ constexpr unsigned long TX_CHANNEL_DWELL_MS =9000UL;
 constexpr unsigned long TX_SEARCH_REPEAT_MS = 1500UL;
 
 // RX: сколько времени слушать каждый канал.
-constexpr unsigned long RX_SCAN_DWELL_MS = 3000UL;
+constexpr unsigned long RX_SCAN_DWELL_MS = 6000UL;
 
 // RX: начать поиск, если DATA давно не поступает.
-constexpr unsigned long RX_SCAN_AFTER_IDLE_MS = 6000UL;
+constexpr unsigned long RX_SCAN_AFTER_IDLE_MS = 30000UL;
 
 // RX: начать поиск после такого количества подряд
 // полученных дубликатов DATA (после отправки ACK).
-constexpr uint8_t RX_DUPLICATES_BEFORE_SCAN = 2;
+constexpr uint8_t RX_DUPLICATES_BEFORE_SCAN = 4;
+
+constexpr unsigned long LINK_HEARTBEAT_INTERVAL_MS = 3000UL;

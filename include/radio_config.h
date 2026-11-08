@@ -19,4 +19,4 @@ static const uint8_t LORA_TXEN = 25;
 static const uint32_t TX_NODE_ID = 1;
 static const uint32_t RX_NODE_ID = 2;
 
-constexpr uint32_t TOTAL_MESSAGES = 25;
+//constexpr uint32_t TOTAL_MESSAGES = 1;

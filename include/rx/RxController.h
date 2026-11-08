@@ -36,15 +36,20 @@ private:
     unsigned long lastDataAt_ = 0;
 
     uint8_t testAckDrops_ = 0;
+    bool pendingModSwitchAfterAck_ = false;
+    String pendingModName_ = "";
 
     void startChannelSearch();
     void updateChannelSearch();
 
     void handleRadioEvent();
     void handleReceivedData();
-    void processApplicationMessage(CryptoPacketStatus status,
-                                   const String& plaintext,
-                                   uint32_t cryptoSenderId);
+    void processApplicationMessage(
+        CryptoPacketStatus status,
+        const String& plaintext,
+        uint32_t cryptoSenderId,
+        uint64_t cryptoCounter
+    );
     void startAck(uint32_t messageId);
     void printPeriodicStats();
 };

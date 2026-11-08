@@ -5,6 +5,11 @@
 
 RadioChannelManager radioChannelManager;
 
+RadioChannelManager::RadioChannelManager() {
+    for (uint8_t i = 0; i < RADIO_CHANNEL_COUNT; i++) {
+        channelsMHz_[i] = RADIO_CHANNELS_MHZ[i];
+    }
+}
 
 bool RadioChannelManager::setChannel(uint8_t channel) {
     if (channel >= RADIO_CHANNEL_COUNT) {
@@ -17,8 +22,7 @@ bool RadioChannelManager::setChannel(uint8_t channel) {
 
     radio.standby();
 
-    // RadioLib API in this project uses MHz.
-    const float frequencyMHz = RADIO_CHANNELS_MHZ[channel];
+    const float frequencyMHz = channelsMHz_[channel];
 
     Serial.print("[RADIO] Changing frequency to ");
     Serial.print(frequencyMHz);
@@ -43,13 +47,68 @@ bool RadioChannelManager::setChannel(uint8_t channel) {
     return true;
 }
 
+bool RadioChannelManager::setPrimaryFrequency(float freqMHz) {
+    if (freqMHz < 850.0f || freqMHz > 930.0f) {
+        return false;
+    }
+
+    if (currentChannel_ == RADIO_PRIMARY_CHANNEL) {
+        radio.standby();
+
+        const int state = radio.setFrequency(freqMHz);
+
+        if (state != RADIOLIB_ERR_NONE) {
+            Serial.print("[RADIO] Primary frequency apply failed: ");
+            Serial.println(state);
+            return false;
+        }
+    }
+
+    channelsMHz_[RADIO_PRIMARY_CHANNEL] = freqMHz;
+
+    Serial.print("[RADIO] Primary frequency set to ");
+    Serial.print(freqMHz);
+    Serial.println(" MHz");
+
+    return true;
+}
+bool RadioChannelManager::setBackupFrequency(float freqMHz) {
+    constexpr uint8_t BACKUP_CHANNEL = 1;
+
+    if (RADIO_CHANNEL_COUNT <= BACKUP_CHANNEL ||
+        freqMHz < 850.0f ||
+        freqMHz > 930.0f) {
+        return false;
+    }
+
+    if (currentChannel_ == BACKUP_CHANNEL) {
+        radio.standby();
+
+        const int state = radio.setFrequency(freqMHz);
+
+        if (state != RADIOLIB_ERR_NONE) {
+            Serial.print("[RADIO] Backup frequency apply failed: ");
+            Serial.println(state);
+            return false;
+        }
+    }
+
+    channelsMHz_[BACKUP_CHANNEL] = freqMHz;
+
+    Serial.print("[RADIO] Backup frequency set to ");
+    Serial.print(freqMHz);
+    Serial.println(" MHz");
+
+    return true;
+}
+
+
 bool RadioChannelManager::switchToNext() {
     const uint8_t nextChannel =
         (currentChannel_ + 1) % RADIO_CHANNEL_COUNT;
 
     return setChannel(nextChannel);
 }
-
 
 bool RadioChannelManager::startSearch(unsigned long dwellMs) {
     if (dwellMs == 0 || searching_) {
@@ -71,7 +130,6 @@ bool RadioChannelManager::startSearch(unsigned long dwellMs) {
     return true;
 }
 
-
 bool RadioChannelManager::updateSearch() {
     if (!searching_) {
         return false;
@@ -91,25 +149,18 @@ bool RadioChannelManager::updateSearch() {
     return true;
 }
 
-
 void RadioChannelManager::stopSearch() {
     searching_ = false;
-
-    Serial.print("[RADIO] Search stopped on channel ");
-    Serial.println(currentChannel_);
 }
-
 
 bool RadioChannelManager::isSearching() const {
     return searching_;
 }
 
-
 uint8_t RadioChannelManager::currentChannel() const {
     return currentChannel_;
 }
 
-
 float RadioChannelManager::currentFrequencyMHz() const {
-    return RADIO_CHANNELS_MHZ[currentChannel_];
+    return channelsMHz_[currentChannel_];
 }

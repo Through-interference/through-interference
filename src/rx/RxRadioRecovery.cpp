@@ -17,6 +17,13 @@ RxRadioRecovery::RxRadioRecovery(bool& transmitFlag, volatile bool& operationDon
 }
 
 bool RxRadioRecovery::initializeRadio() {
+    // Сначала пробуем восстановить радио с полным боевым конфигом (SF9, мощность, AES)
+    if (reinitCb_ && reinitCb_()) {
+        radioInitialized_ = true;
+        return true;
+    }
+
+    // Если рабочего конфига еще нет (самый первый старт до загрузки NVS) - базовый фоллбэк
     radio.setRfSwitchPins(LORA_RXEN, LORA_TXEN);
     radio.tcxoVoltage = 1.8;
 
