@@ -13,8 +13,9 @@ import queue
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-from tools.can_client import CanFrame, UsbReceiver, encode_frame
+from tools.can_client import CanFrame, UsbReceiver, encode_frame, parse_status
 from tools.canable import Canable
+from tools.serial_lines import SerialLines
 
 try:
     import serial
@@ -40,7 +41,11 @@ class BplaGcsApp:
         # Состояние Serial
         self.ser: serial.Serial | None = None
         self.alive = False
-        self.rx_queue: queue.Queue[str] = queue.Queue()
+        self._connecting = False
+        self._connection_id = 0
+        self._serial_stop = None
+        self._serial_thread = None
+        self.rx_queue: queue.Queue[str | tuple[int, str | Exception]] = queue.Queue()
         self.tx_lock = threading.Lock()
         self.can_receiver = UsbReceiver()
         self.var_can_id = tk.StringVar(value="123")
@@ -128,7 +133,7 @@ class BplaGcsApp:
         self.port_combo.pack(side=tk.LEFT, padx=4)
         ttk.Button(top_frame, text="Обновить", command=self.refresh_ports, width=10).pack(side=tk.LEFT, padx=4)
         ttk.Label(top_frame, text="Скорость:").pack(side=tk.LEFT, padx=(10, 4))
-        baud_combo = ttk.Combobox(top_frame, textvariable=self.var_baud, values=["57600", "115200", "230400", "460800"], width=10, state="readonly")
+        baud_combo = ttk.Combobox(top_frame, textvariable=self.var_baud, values=["115200"], width=10, state="readonly")
         baud_combo.pack(side=tk.LEFT, padx=4)
 
         self.btn_connect = ttk.Button(top_frame, text="Подключить", command=self.toggle_connection, width=14)
@@ -368,60 +373,92 @@ class BplaGcsApp:
         else: self.connect_serial()
 
     def connect_serial(self):
+        if self.ser is not None:
+            return
         port, baud = self.var_port.get().strip(), int(self.var_baud.get())
+        if baud != 115200:
+            messagebox.showerror("Скорость UART", "Прошивка поддерживает только 115200 бод.")
+            return
+        device = None
         try:
-            self.ser = serial.Serial(port=None, baudrate=baud, timeout=0.1, write_timeout=1, exclusive=True)
-            self.ser.dtr = False
-            self.ser.rts = False
-            self.ser.port = port
-            self.ser.open()
+            device = serial.Serial(port=None, baudrate=baud, timeout=0.1, write_timeout=1, exclusive=True)
+            device.dtr = False
+            device.rts = False
+            device.port = port
+            device.open()
+            self._connection_id += 1
+            connection_id = self._connection_id
+            self.ser = device
             self.can_receiver = UsbReceiver()
             self.alive = True
-            threading.Thread(target=self._serial_reader_loop, daemon=True).start()
-            self.var_conn_status.set(f"ПОДКЛЮЧЕНО ({port})")
-            self.lbl_conn.config(bg="#d1e7dd", fg="#0f5132")
+            self._serial_stop = threading.Event()
+            self._serial_thread = threading.Thread(target=self._serial_reader_loop,
+                args=(device, self.can_receiver, self._serial_stop, connection_id), daemon=True)
+            self._serial_thread.start()
+            self._await_modem()
             self.btn_connect.config(text="Отключить")
             self.append_log(f"--- Открыт порт {port} @ {baud} бод ---", "info")
-            # Сразу после подключения запрашиваем конфиг с платы
-            self.root.after(1500, self._initialize_modem)
+            self.root.after(1500, self._initialize_modem, connection_id)
         except Exception as e:
+            if self.ser is device and device is not None:
+                self.disconnect_serial()
+            elif device is not None:
+                try: device.close()
+                except Exception: pass
             messagebox.showerror("Ошибка", f"Не удалось открыть {port}:\n{e}")
 
     def disconnect_serial(self):
         if self.alive:
             self.send_line("CAN CLOSE")
+        if self._serial_stop is not None:
+            self._serial_stop.set()
+        self._connection_id += 1
         self.alive = False
-        if self.ser:
-            try: self.ser.close()
-            except: pass
+        self._connecting = False
+        with self.tx_lock:
+            device = self.ser
             self.ser = None
+            if device is not None:
+                try: device.close()
+                except Exception: pass
+        if self._serial_thread is not None:
+            self._serial_thread.join(timeout=.3)
+        self._serial_thread = self._serial_stop = None
         self.var_conn_status.set("ОТКЛЮЧЕНО")
         self.lbl_conn.config(bg="#f8d7da", fg="#842029")
         self.btn_connect.config(text="Подключить")
         self.append_log("--- Порт закрыт ---", "warn")
 
-    def _serial_reader_loop(self):
-        while self.alive and self.ser and self.ser.is_open:
+    def _serial_reader_loop(self, device, receiver, stopping, connection_id):
+        lines = SerialLines()
+        while not stopping.is_set():
             try:
-                raw = self.ser.readline()
-                if raw:
-                    line = raw.decode("utf-8", errors="replace").strip()
-                    if line:
-                        ack = self.can_receiver.feed(line)
-                        if ack:
-                            with self.tx_lock:
-                                self.ser.write((ack + "\r\n").encode("ascii"))
-                        self.rx_queue.put(line)
+                raw = device.readline(2048)
+                if stopping.is_set():
+                    break
+                for line in lines.feed(raw):
+                    ack = receiver.feed(line)
+                    if ack:
+                        with self.tx_lock:
+                            if stopping.is_set():
+                                return
+                            device.write((ack + "\r\n").encode("ascii"))
+                    self.rx_queue.put((connection_id, line))
             except Exception as e:
-                self.rx_queue.put(f"[ERROR] Потеря связи: {e}")
-                self.alive = False
+                if not stopping.is_set():
+                    self.rx_queue.put((connection_id, e))
                 break
 
-    def send_line(self, cmd: str):
+    def send_line(self, cmd: str, connection_id=None):
         if not self.alive or not self.ser or not self.ser.is_open: return
         clean = cmd.strip()
         if not clean: return
+        if self._connecting and clean not in ("VER", "CFG", "CAN OPEN", "CAN STAT", "CAN CLOSE"):
+            self.rx_queue.put("[ERROR] Дождитесь подтверждения наземного модема")
+            return
         with self.tx_lock:
+            if not self.alive or self.ser is None or (connection_id is not None and connection_id != self._connection_id):
+                return
             try:
                 self.ser.write((clean + "\r\n").encode("utf-8"))
                 self.ser.flush()
@@ -429,10 +466,23 @@ class BplaGcsApp:
             except Exception as e:
                 self.rx_queue.put(f"[ERROR] Ошибка отправки: {e}")
 
-    def _initialize_modem(self):
-        if self.alive:
-            for command in ("VER", "CFG", "CAN OPEN", "CAN STAT"):
-                self.send_line(command)
+    def _initialize_modem(self, connection_id):
+        if self.alive and connection_id == self._connection_id:
+            for command in ("VER", "CFG", "CAN STAT"):
+                self.send_line(command, connection_id)
+
+    def _await_modem(self):
+        self._connecting = True
+        self._handshake_deadline = time.monotonic() + 6
+        self.var_conn_status.set(f"ПРОВЕРКА МОДЕМА ({self.ser.port})")
+        self.lbl_conn.config(bg="#fff3cd", fg="#664d03")
+        self.root.after(6000, self._check_handshake, self._connection_id, self._handshake_deadline)
+
+    def _check_handshake(self, connection_id, deadline):
+        if (self.alive and self._connecting and connection_id == self._connection_id
+                and deadline == self._handshake_deadline):
+            self.append_log("[ERROR] Наземный модем не подтвердил подключение. Проверьте порт и прошивку.", "error")
+            self.disconnect_serial()
 
     def send_can_frame(self):
         frame = self._input_can_frame()
@@ -506,6 +556,14 @@ class BplaGcsApp:
         for _ in range(200):
             if self.rx_queue.empty(): break
             line = self.rx_queue.get_nowait()
+            if isinstance(line, tuple):
+                connection_id, line = line
+                if connection_id != self._connection_id:
+                    continue
+                if isinstance(line, Exception):
+                    self.append_log(f"[ERROR] Потеря связи: {line}", "error")
+                    self.disconnect_serial()
+                    continue
             self._parse_telemetry_line(line)
             if line.startswith("[CANable RX] "):
                 self.var_air_received.set("На CAN борта принято " + line[len("[CANable RX] "):])
@@ -525,11 +583,27 @@ class BplaGcsApp:
 
     def _parse_telemetry_line(self, line: str):
         if line.startswith("+READY: GROUND"):
+            self._await_modem()
             self.send_line("CAN OPEN")
+            self.send_line("CAN STAT")
         if line.startswith("+CAN LINK "):
             self.var_link_state.set(line.rsplit(" ", 1)[-1])
         if line.startswith("+CAN STAT: "):
-            fields = dict(part.split("=", 1) for part in line[len("+CAN STAT: "):].split(",") if "=" in part)
+            try:
+                fields = parse_status(line)
+            except ValueError:
+                return
+            if fields['ROLE'] != 'GROUND':
+                self.append_log("[ERROR] Выбран бортовой модем. Подключите USB наземного ESP32 TX.", "error")
+                self.disconnect_serial()
+                return
+            if fields['OPEN'] == 1:
+                self._connecting = False
+                self.var_conn_status.set(f"ПОДКЛЮЧЕНО ({self.ser.port})")
+                self.lbl_conn.config(bg="#d1e7dd", fg="#0f5132")
+            else:
+                self.send_line("CAN OPEN")
+                self.send_line("CAN STAT")
             self.var_link_state.set(fields.get("LINK", "UNKNOWN"))
             self.var_last_ack.set(fields.get("USB_PENDING", "—"))
             self.var_tx_rx_stat.set(f"RF TX: {fields.get('RF_TX', '0')} | RX: {fields.get('RF_RX', '0')}")
@@ -582,15 +656,16 @@ class BplaGcsApp:
         self.var_key.set(secrets.token_hex(16).upper())
 
     def poll_telemetry_once(self):
-        if not self.alive: return
+        if not self.alive or self._connecting: return
+        connection_id = self._connection_id
         def _poll():
             for cmd in ("RSSI", "SNR", "STAT"):
-                self.send_line(cmd)
+                self.send_line(cmd, connection_id)
                 time.sleep(0.06)
         threading.Thread(target=_poll, daemon=True).start()
 
     def _auto_poll_telemetry(self):
-        if self.alive:
+        if self.alive and not self._connecting:
             self.send_line("CAN OPEN")
             self.send_line("CAN STAT")
         if self.alive and self.auto_poll_var.get():

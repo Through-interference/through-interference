@@ -32,6 +32,7 @@ private:
     unsigned long lastPeerAt_ = 0;
     unsigned long lastChannelAt_ = 0;
     unsigned long retryRadioAt_ = 0;
+    unsigned long retryCanAt_ = 0;
     unsigned long usbLeaseAt_ = 0;
     unsigned long nextUsbAt_ = 0;
     uint32_t usbDeliveryId_ = 1;
@@ -48,6 +49,9 @@ private:
     static bool canBaud(void* context, uint32_t bitrate);
     bool command(const String& line, Stream& port);
     bool configure(const ModemConfig& config);
+    bool startReceive();
+    void radioFailure(const char* stage, int state);
+    void startCan();
     void send(canlink::PacketKind kind, bool includePayload);
     void receive();
     void serviceUsb();

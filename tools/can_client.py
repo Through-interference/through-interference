@@ -6,6 +6,21 @@ import queue
 import re
 import threading
 import time
+from tools.serial_lines import SerialLines
+
+
+def parse_status(line: str) -> dict:
+    if not line.startswith('+CAN STAT: '):
+        raise ValueError('Not a CAN status response')
+    state = {}
+    for field in line[len('+CAN STAT: '):].split(','):
+        key, separator, value = field.partition('=')
+        if not separator or not re.fullmatch(r'[A-Z_]+', key) or not value or key in state:
+            raise ValueError('Malformed CAN status response')
+        state[key] = int(value) if value.isdecimal() else value
+    if state.get('ROLE') not in ('GROUND', 'AIR') or state.get('OPEN') not in (0, 1):
+        raise ValueError('CAN status is missing its role or USB state')
+    return state
 
 
 @dataclass(frozen=True)
@@ -135,34 +150,30 @@ class CanModem:
         raise TimeoutError('Ground modem did not open the CAN USB session')
 
     def _reader(self):
+        lines = SerialLines()
         try:
             while not self._stop.is_set():
                 raw = self._serial.readline(2048)
-                if not raw:
-                    continue
-                line = raw.decode('ascii', errors='replace').strip()
-                if not line:
-                    continue
-                self.logs.append(line)
-                ack = self.receiver.feed(line)
-                if ack:
-                    self._write(ack)
-                if line.startswith('+READY: GROUND'):
-                    self._write('CAN OPEN')
-                with self._condition:
-                    if line == '+CAN QUEUED':
-                        self._queued += 1
-                    elif line.startswith('ERROR:'):
-                        self._last_error = line
-                        self._error_number += 1
-                    elif line.startswith('+CAN STAT: '):
-                        state = {}
-                        for field in line[len('+CAN STAT: '):].split(','):
-                            key, value = field.split('=', 1)
-                            state[key] = int(value) if value.isdecimal() else value
-                        self._status = state
-                        self._status_number += 1
-                    self._condition.notify_all()
+                for line in lines.feed(raw):
+                    self.logs.append(line)
+                    ack = self.receiver.feed(line)
+                    if ack:
+                        self._write(ack)
+                    if line.startswith('+READY: GROUND'):
+                        self._write('CAN OPEN')
+                    with self._condition:
+                        if line == '+CAN QUEUED':
+                            self._queued += 1
+                        elif line.startswith('ERROR:'):
+                            self._last_error = line
+                            self._error_number += 1
+                        elif line.startswith('+CAN STAT: '):
+                            try:
+                                self._status = parse_status(line)
+                            except ValueError:
+                                continue
+                            self._status_number += 1
+                        self._condition.notify_all()
         except Exception as exc:
             if not self._stop.is_set():
                 with self._condition:

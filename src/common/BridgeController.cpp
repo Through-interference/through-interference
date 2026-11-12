@@ -31,7 +31,7 @@ void BridgeController::begin() {
     config_ = at_.getCurrentConfig();
     ModemConfig initial; at_.takePendingConfig(initial);
     cryptoReady_ = cryptoInit();
-    if (airborne_ && !can_.begin(config_.canBaud)) Serial.println("ERROR: CAN_START_FAILED");
+    if (airborne_) startCan();
     configure(config_);
     lastChannelAt_ = millis();
     Serial.printf("+READY: %s CANLINK=2\n", airborne_ ? "AIR" : "GROUND");
@@ -44,7 +44,7 @@ bool BridgeController::configure(const ModemConfig& c) {
         Serial.println("ERROR: UNBOUND_USE_KEY_SAVE"); retryRadioAt_ = millis() + 2000; return false;
     }
     int state;
-    const float frequency = radioChannelManager.currentChannel() == 0 ? c.primFreqMhz : c.backFreqMhz;
+    const float frequency = !c.fhssEnabled || radioChannelManager.currentChannel() == 0 ? c.primFreqMhz : c.backFreqMhz;
     radio.setRfSwitchPins(LORA_RXEN, LORA_TXEN);
     switch (c.modulation) {
         case classModulation::GFSK100:
@@ -58,6 +58,8 @@ bool BridgeController::configure(const ModemConfig& c) {
         default: state = -1;
     }
     if (state == RADIOLIB_ERR_NONE && !cryptoUpdateKey(c.aesKey)) state = -1;
+    if (state == RADIOLIB_ERR_NONE && !c.fhssEnabled &&
+        !radioChannelManager.setChannel(RADIO_PRIMARY_CHANNEL)) state = -1;
     if (state == RADIOLIB_ERR_NONE && !radioChannelManager.setPrimaryFrequency(c.primFreqMhz)) state = -1;
     if (state == RADIOLIB_ERR_NONE && !radioChannelManager.setBackupFrequency(c.backFreqMhz)) state = -1;
     radio.setRfSwitchPins(LORA_RXEN, LORA_TXEN); radio.setDio1Action(setFlag);
@@ -67,6 +69,27 @@ bool BridgeController::configure(const ModemConfig& c) {
     else Serial.println("+RADIO: READY");
     retryRadioAt_ = millis() + 2000; nextPollAt_ = millis() + 30;
     return radioReady_;
+}
+
+void BridgeController::radioFailure(const char* stage, int state) {
+    ++timeouts_;
+    radioReady_ = transmitting_ = waiting_ = responsePending_ = false;
+    operationDone = false;
+    radio.standby();
+    retryRadioAt_ = millis() + 250;
+    Serial.printf("ERROR: RADIO_%s=%d\n", stage, state);
+}
+
+bool BridgeController::startReceive() {
+    const int state = radio.startReceive();
+    if (state == RADIOLIB_ERR_NONE) return true;
+    radioFailure("RX", state);
+    return false;
+}
+
+void BridgeController::startCan() {
+    if (!can_.begin(config_.canBaud)) Serial.println("ERROR: CAN_START_FAILED");
+    retryCanAt_ = millis() + 2000;
 }
 
 unsigned long BridgeController::receiveWindow() const {
@@ -96,27 +119,27 @@ void BridgeController::send(canlink::PacketKind kind, bool includePayload) {
     if (state == RADIOLIB_ERR_NONE) {
         transmitting_ = true; txAt_ = millis(); ++radioTx_;
     } else {
-        ++timeouts_; radio.startReceive(); nextPollAt_ = millis() + 100;
+        ++timeouts_; startReceive(); nextPollAt_ = millis() + 100;
     }
 }
 
 void BridgeController::receive() {
     String encrypted;
     const int state = radio.readData(encrypted);
-    if (state != RADIOLIB_ERR_NONE) { ++badPackets_; radio.startReceive(); return; }
+    if (state != RADIOLIB_ERR_NONE) { ++badPackets_; startReceive(); return; }
     uint8_t bytes[canlink::PacketCapacity]; size_t length = 0; uint32_t sender = 0; uint64_t counter = 0;
     const CryptoPacketStatus status = cryptoDecryptBytes(encrypted, bytes, sizeof(bytes), length, sender, counter, false);
     canlink::Packet packet;
     const canlink::PacketKind expected = airborne_ ? canlink::PacketKind::Poll : canlink::PacketKind::Response;
     if (status != CRYPTO_PACKET_NEW ||
         !canlink::decodePacket(bytes, length, packet) || packet.kind != expected) {
-        ++badPackets_; radio.startReceive(); return;
+        ++badPackets_; startReceive(); return;
     }
     ++radioRx_; lastPeerAt_ = millis(); peerReady_ = packet.ready;
     endpoint_.receive(packet, *this);
     if (airborne_) { replyDestination_ = packet.session; responsePending_ = true; replyAt_ = millis() + 8; }
     else { waiting_ = false; nextPollAt_ = millis() + (endpoint_.pending() || packet.count ? 2 : 50); }
-    radio.startReceive();
+    startReceive();
 }
 
 void BridgeController::serviceUsb() {
@@ -133,13 +156,15 @@ void BridgeController::serviceUsb() {
 }
 
 void BridgeController::recoverChannel() {
-    if (transmitting_ || responsePending_ || waiting_) return;
+    if (!config_.fhssEnabled || transmitting_ || responsePending_ || waiting_) return;
     const unsigned long now = millis();
     const unsigned long idle = lastPeerAt_ ? now - lastPeerAt_ : now;
     const unsigned long dwell = airborne_ ? 6000 : 9000;
     if (idle < 5000 || now - lastChannelAt_ < dwell) return;
     lastChannelAt_ = now;
-    if (radioChannelManager.switchToNext()) { operationDone = false; radio.startReceive(); nextPollAt_ = now + 20; }
+    if (radioChannelManager.switchToNext()) {
+        operationDone = false; startReceive(); nextPollAt_ = now + 20;
+    } else radioFailure("CHANNEL", -1);
 }
 
 void BridgeController::update() {
@@ -148,21 +173,23 @@ void BridgeController::update() {
         reportedUncertain_ = endpoint_.uncertain();
         Serial.printf("+CAN UNCERTAIN %lu\n", static_cast<unsigned long>(reportedUncertain_));
     }
-    if (airborne_) can_.update(endpoint_);
+    if (airborne_) {
+        if (!can_.ready() && due(millis(), retryCanAt_)) startCan();
+        can_.update(endpoint_);
+    }
     serviceUsb();
     const unsigned long now = millis();
     if (radioReady_ && operationDone) {
         operationDone = false;
         if (transmitting_) {
             const int state = radio.finishTransmit(); transmitting_ = false;
-            radio.startReceive();
-            if (!airborne_ && state == RADIOLIB_ERR_NONE) { waiting_ = true; deadline_ = millis() + receiveWindow(); }
+            const bool receiving = startReceive();
+            if (!airborne_ && state == RADIOLIB_ERR_NONE && receiving) { waiting_ = true; deadline_ = millis() + receiveWindow(); }
             else if (state != RADIOLIB_ERR_NONE) { ++timeouts_; nextPollAt_ = millis() + 100; }
         } else receive();
     }
     if (transmitting_ && now - txAt_ > 6000) {
-        radio.standby(); operationDone = false; transmitting_ = waiting_ = false;
-        ++timeouts_; radioReady_ = false; retryRadioAt_ = now + 250;
+        radioFailure("TX_TIMEOUT", -1);
     }
     if (waiting_ && due(now, deadline_)) { waiting_ = false; ++timeouts_; nextPollAt_ = now + 20; }
     if (!transmitting_ && !waiting_ && !responsePending_) {
@@ -172,9 +199,9 @@ void BridgeController::update() {
     }
     if (radioReady_ && !transmitting_) {
         recoverChannel();
-        if (airborne_ && responsePending_ && due(now, replyAt_)) {
+        if (radioReady_ && airborne_ && responsePending_ && due(now, replyAt_)) {
             responsePending_ = false; send(canlink::PacketKind::Response, peerReady_);
-        } else if (!airborne_ && !waiting_ && due(now, nextPollAt_)) {
+        } else if (radioReady_ && !airborne_ && !waiting_ && due(now, nextPollAt_)) {
             nextPollAt_ = now + 100; send(canlink::PacketKind::Poll, true);
         }
     }
@@ -195,7 +222,9 @@ bool BridgeController::extension(void* context, const String& line, Stream& port
 }
 bool BridgeController::canBaud(void* context, uint32_t bitrate) {
     BridgeController* self = static_cast<BridgeController*>(context);
-    return self->airborne_ && self->can_.changeBitrate(bitrate);
+    if (!self->airborne_ || !self->can_.changeBitrate(bitrate)) return false;
+    self->config_.canBaud = bitrate;
+    return true;
 }
 bool BridgeController::command(const String& line, Stream& port) {
     if (!line.startsWith("CAN ")) return false;
@@ -205,8 +234,8 @@ bool BridgeController::command(const String& line, Stream& port) {
         return true;
     }
     if (line == "CAN STAT") {
-        port.printf("+CAN STAT: ROLE=%s,OPEN=%u,LINK=%s,PEER_READY=%u,TX_PENDING=%u,USB_PENDING=%u,USB_RX=%lu,CAN_RX=%lu,CAN_TX=%lu,CAN_PENDING=%u,CAN_DROP=%lu,CAN_FAIL=%lu,BUS_OFF=%lu,RF_TX=%lu,RF_RX=%lu,RF_TIMEOUT=%lu,RF_BAD=%lu,QUEUE_REJECT=%lu,UNCERTAIN=%lu\r\nOK\r\n",
-            airborne_ ? "AIR" : "GROUND", usbOpen_, connected_ ? "UP" : "DOWN", peerReady_,
+        port.printf("+CAN STAT: ROLE=%s,OPEN=%u,LINK=%s,CAN_READY=%u,PEER_READY=%u,TX_PENDING=%u,USB_PENDING=%u,USB_RX=%lu,CAN_RX=%lu,CAN_TX=%lu,CAN_PENDING=%u,CAN_DROP=%lu,CAN_FAIL=%lu,BUS_OFF=%lu,RF_TX=%lu,RF_RX=%lu,RF_TIMEOUT=%lu,RF_BAD=%lu,QUEUE_REJECT=%lu,UNCERTAIN=%lu\r\nOK\r\n",
+            airborne_ ? "AIR" : "GROUND", usbOpen_, connected_ ? "UP" : "DOWN", can_.ready(), peerReady_,
             static_cast<unsigned>(endpoint_.pending()), static_cast<unsigned>(usbRx_.size()),
             static_cast<unsigned long>(usbDelivered_), static_cast<unsigned long>(can_.received), static_cast<unsigned long>(can_.transmitted),
             static_cast<unsigned>(can_.pending()), static_cast<unsigned long>(can_.dropped), static_cast<unsigned long>(can_.failures),
