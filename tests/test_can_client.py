@@ -108,5 +108,62 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'uncertain|reconnect'):
             modem.send(self.api.CanFrame(0x123, b'B'), timeout=.01)
 
+    def test_fragmented_status_and_can_frames_survive_serial_timeout(self):
+        import serial
+        master, slave = os.openpty()
+        modem = self.api.CanModem(os.ttyname(slave))
+        modem._serial = serial.Serial(modem.port, 115200, timeout=.1, write_timeout=1)
+        reader = threading.Thread(target=modem._reader, daemon=True)
+        reader.start()
+        peer_errors = []
+
+        def peer():
+            try:
+                if not select.select([master], [], [], 2)[0]:
+                    raise AssertionError('No status command')
+                os.read(master, 2048)
+                os.write(master, b'+CAN STAT: ROLE=GROUND,BROKEN\r\n')
+                os.write(master, b'+CAN STAT: ROLE=GROUND,OP')
+                time.sleep(.25)
+                os.write(master, b'EN=1,LINK=UP\r\nOK\r\n+CAN RX 1 t1232')
+                time.sleep(.25)
+                os.write(master, b'00FF\r\n')
+            except Exception as exc:
+                peer_errors.append(exc)
+
+        thread = threading.Thread(target=peer, daemon=True)
+        thread.start()
+        try:
+            self.assertEqual(modem.stats(timeout=2), {'ROLE': 'GROUND', 'OPEN': 1, 'LINK': 'UP'})
+            self.assertEqual(modem.read(timeout=2), self.api.CanFrame(0x123, b'\x00\xff'))
+            self.assertTrue(select.select([master], [], [], 2)[0])
+            self.assertIn(b'CAN ACK 1', os.read(master, 2048))
+            self.assertIsNone(modem._io_error)
+            self.assertTrue(reader.is_alive())
+        finally:
+            modem._stop.set()
+            thread.join(2)
+            reader.join(1)
+            modem._serial.close()
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(peer_errors, [])
+
+    def test_line_buffer_discards_oversized_lines_until_newline(self):
+        from tools.serial_lines import SerialLines
+        lines = SerialLines(limit=8)
+        self.assertEqual(lines.feed(b'OK\r'), ['OK'])
+        self.assertEqual(lines.feed(b'\n'), [])
+        self.assertEqual(lines.feed(b'x' * 10000), [])
+        self.assertLessEqual(len(lines.pending), 8)
+        self.assertEqual(lines.feed(b'OK\nGOOD\n'), ['GOOD'])
+
+    def test_malformed_status_does_not_look_like_a_valid_handshake(self):
+        for line in ('+CAN STAT: ROLE=GROUND', '+CAN STAT: OPEN=1',
+                     '+CAN STAT: ROLE=GROUND,OPEN=2', '+CAN STAT: ROLE=GROUND,OPEN=1,OPEN=0',
+                     '+CAN STAT: ROLE=GROUND,OPEN=1,BROKEN'):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                self.api.parse_status(line)
+
 
 if __name__ == '__main__': unittest.main()
