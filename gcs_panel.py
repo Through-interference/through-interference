@@ -158,7 +158,7 @@ class BplaGcsApp:
 
         grid_cur = [
             ("Прайм частота:", self.var_cur_prim, "Резерв:", self.var_cur_back),
-            ("Мощность (TX):", self.var_cur_pwr, "Модуляция:", self.var_cur_mod),
+            ("TX чипа (dBm):", self.var_cur_pwr, "Модуляция:", self.var_cur_mod),
         ]
         
         for r, (l1, v1, l2, v2) in enumerate(grid_cur):
@@ -167,7 +167,7 @@ class BplaGcsApp:
             ttk.Label(cur_cfg_frame, text=l2).grid(row=r, column=2, sticky=tk.W, pady=2)
             ttk.Label(cur_cfg_frame, textvariable=v2, style="TableVal.TLabel").grid(row=r, column=3, sticky=tk.W, padx=(2, 0), pady=2)
 
-        ttk.Button(cur_cfg_frame, text="Считать настройки из NVS (CFG)", command=lambda: self.send_line("CFG")).grid(row=len(grid_cur), column=0, columnspan=4, sticky=tk.EW, pady=(6, 0))
+        ttk.Button(cur_cfg_frame, text="Считать текущие настройки (CFG)", command=lambda: self.send_line("CFG")).grid(row=len(grid_cur), column=0, columnspan=4, sticky=tk.EW, pady=(6, 0))
 
         # 2.2 Телеметрия
         telem_frame = ttk.LabelFrame(left_col, text=" Радиомониторинг (Телеметрия) ", padding=8)
@@ -210,7 +210,7 @@ class BplaGcsApp:
         ttk.Entry(cfg_frame, textvariable=self.var_back_freq, width=10).grid(row=1, column=1, sticky=tk.E, pady=3)
         ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"BACKFREQ {self.var_back_freq.get().strip()}")).grid(row=1, column=2, padx=2)
 
-        ttk.Label(cfg_frame, text="Мощность:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(cfg_frame, text="TX чипа (dBm):").grid(row=2, column=0, sticky=tk.W, pady=3)
         ttk.Spinbox(cfg_frame, from_=-9, to=22, textvariable=self.var_pwr, width=8).grid(row=2, column=1, sticky=tk.E, pady=3)
         ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"PWR {self.var_pwr.get().strip()}")).grid(row=2, column=2, padx=2)
 
@@ -218,7 +218,7 @@ class BplaGcsApp:
         ttk.Combobox(cfg_frame, textvariable=self.var_mod, values=["LORA_SF9", "LORA_SF7", "GFSK250", "GFSK100"], width=9, state="readonly").grid(row=3, column=1, sticky=tk.E, pady=3)
         ttk.Button(cfg_frame, text="▶", width=3, command=lambda: self.send_line(f"MOD {self.var_mod.get().strip()}")).grid(row=3, column=2, padx=2)
 
-        ttk.Label(cfg_frame, text="Параметры радио задаются на обеих платах.", wraplength=300).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
+        ttk.Label(cfg_frame, text="E22-900M30S: 22 — максимальная настройка чипа, до ≈30 dBm на выходе модуля. Это настройка, не измерение. Борт настраивается отдельно через USB-терминал.", wraplength=300).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
 
         ttk.Label(cfg_frame, text="AES-128 (32 HEX):").grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(4, 1))
         ttk.Entry(cfg_frame, textvariable=self.var_key, font=("Monospace", 9)).grid(row=7, column=0, columnspan=3, sticky=tk.EW, pady=2)

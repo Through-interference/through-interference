@@ -115,7 +115,8 @@ def main(argv=None):
     parser.add_argument('--air-port', required=True, help='USB serial port of air RX ESP32, not CANable')
     parser.add_argument('--new-key', action='store_true', required=True,
                         help='explicitly replace both stored keys; only for a new/reset pair')
-    parser.add_argument('--power', type=int, default=20, help='TX power in dBm, -9..22 (default 20)')
+    parser.add_argument('--power', type=int, default=20,
+                        help='SX1262 chip TX power in dBm, -9..22 (default 20); 22 selects the E22-900M30S maximum profile')
     args = parser.parse_args(argv)
     if os.path.realpath(args.ground_port) == os.path.realpath(args.air_port):
         parser.error('ground and air must be distinct serial ports')

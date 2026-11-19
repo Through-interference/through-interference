@@ -5,7 +5,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#define FW_VERSION "2.0.0-CAN"
+#define FW_VERSION "2.0.1-CAN-E22"
 
 namespace {
 
