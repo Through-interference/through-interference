@@ -1,0 +1,128 @@
+{
+  "firmware_version": "2.0.1-CAN-E22",
+  "release_date": "2026-11-19",
+  "board": "esp32dev / classic ESP32 / 4MB flash",
+  "radio": "Ebyte E22-900M30S",
+  "base_commit": "bf295202106ecaa4cecf13ea2e2b207d91c8bee7",
+  "toolchain": {
+    "platform": "espressif32@6.9.0",
+    "RadioLib": "7.1.2",
+    "PlatformIO": "6.1.18",
+    "build_esptool": "4.5.1",
+    "recommended_flash_esptool": "4.11.0"
+  },
+  "flash": {
+    "mode": "dio",
+    "frequency": "40m",
+    "size": "4MB",
+    "baud": 115200,
+    "preserved_nvs": {
+      "offset": "0x9000",
+      "length": "0x5000"
+    },
+    "erase_all": false
+  },
+  "images": {
+    "ground": [
+      {
+        "path": "ground/bootloader.bin",
+        "offset": "0x1000",
+        "bytes": 17536,
+        "sha256": "3d234a7471f67b013686dabd4dee7c1fa915c9928463616a94bc9297acf1abf8"
+      },
+      {
+        "path": "ground/partitions.bin",
+        "offset": "0x8000",
+        "bytes": 3072,
+        "sha256": "148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1"
+      },
+      {
+        "path": "ground/boot_app0.bin",
+        "offset": "0xe000",
+        "bytes": 8192,
+        "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+      },
+      {
+        "path": "ground/firmware.bin",
+        "offset": "0x10000",
+        "bytes": 356992,
+        "sha256": "ac1b0723e5b0e7069492c82a2027af75c5fe9b9a82a0c0fcebde00992bb362ac"
+      }
+    ],
+    "air": [
+      {
+        "path": "air/bootloader.bin",
+        "offset": "0x1000",
+        "bytes": 17536,
+        "sha256": "3d234a7471f67b013686dabd4dee7c1fa915c9928463616a94bc9297acf1abf8"
+      },
+      {
+        "path": "air/partitions.bin",
+        "offset": "0x8000",
+        "bytes": 3072,
+        "sha256": "148b959cbff1c38aa8e1d5c0ba9d612c54997b945e56a63f41223eef650653a1"
+      },
+      {
+        "path": "air/boot_app0.bin",
+        "offset": "0xe000",
+        "bytes": 8192,
+        "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+      },
+      {
+        "path": "air/firmware.bin",
+        "offset": "0x10000",
+        "bytes": 356992,
+        "sha256": "c4d1dd0360505ffd2ff6cc2744b0da671b530cf269d45775e4d589c443e47d2c"
+      }
+    ]
+  },
+  "power": {
+    "chip_command": "PWR 22",
+    "chip_max_dbm": 22,
+    "chip_ocp_ma": 140,
+    "module_nominal_max_dbm": 30,
+    "default_chip_dbm": 20,
+    "rf_output_measured": false,
+    "ocp_readback_required_before_rx_tx": true
+  },
+  "validation": {
+    "python_unittest_count": 42,
+    "python_unittest_passed": true,
+    "firmware_builds": [
+      "tx",
+      "rx"
+    ],
+    "hardware_flashed": false,
+    "hardware_tested": false,
+    "independent_review": "one code issue and three guide issues addressed; OCP lost-write regression verified RED to GREEN"
+  },
+  "source_inputs_root": "repository root",
+  "source_inputs_sha256": {
+    "include/AtCommandManager.h": "40f8a52aa978096e2c8c05c34d0b33a8596cd86de13416a76186154ed09bb871",
+    "include/BridgeController.h": "e380c6dbbcfb9aa4e9b9207d3d97013385c7d3f497a8101f094347bb73742f3f",
+    "include/CanHardware.h": "712419bc7e0eb6b6f4a329bd17f98e975ae449a029b921888ae6529d36a5965c",
+    "include/CanProtocol.h": "188b6a69f1cc10f1b951d8004c10f9464770bb6c5e27b0a5677bcb207d8fa0ac",
+    "include/RadioChannelManager.h": "5aa2881ac1351333ce3e38a72a1453716a6040ab2ad35508428d40ac0e4e062c",
+    "include/ReliableEndpoint.h": "3d162caba54abb37280aec5914bfd5e7d031f74eb1c1acd87a07f21eb8ea37cb",
+    "include/crypto.h": "97615e74ee58a8cfb2b493d25d8f3ed71c273f5f6a08f64dddb4ba83730338fe",
+    "include/frequency_config.h": "14bfcf8576447ac4abc29a5a9bb3775a738310d635fe598ff49d12e8b65f4e66",
+    "include/radio_config.h": "c6b6b77af807ded3ec4783551e3acba2d64bdda102eb998ace57eeba7263a68d",
+    "include/radio_hardware.h": "6b3dc123c6c2bb3a99081415a7a334554a517d5d9619bc272af5c55fb96b9c23",
+    "include/rx/RxController.h": "ec9eb8cb8e21f8eb31ba6c235ae466995978b4ba91393a9f21f6a4b0a663dab5",
+    "include/tx/TxController.h": "3742675a9089d5247c0c81941cb9d26c7b6290eaf3467d9bcf1afbd0431923f8",
+    "platformio.ini": "c4cd588f112e9fd79d969a15555b1b6fce97a05c3bf28b3cbed90140acf7c536",
+    "src/common/AtCommandManager.cpp": "0aa9859f34c86ecccbbcc41c529b14add912f090bd1c75476f3c6febb3005d4d",
+    "src/common/BridgeController.cpp": "77fe216907e1ed26b9fce5f924f02a6dfced6254bc412dfea37c9a956a9fda79",
+    "src/common/CanHardware.cpp": "7a8a43a2abc4889a8c86c05e0e5d73cd1953580c677445d70fd376cb895518e2",
+    "src/common/CanProtocol.cpp": "0e31d7d76073a16ee92e92addd68682afe08fadc9dc5073918cf45391159e945",
+    "src/common/RadioChannelManager.cpp": "ed0336d3d11a29a33f2e2c5e234bedd7f3c2dff267cd9fa8e2275182b9aae5ac",
+    "src/common/ReliableEndpoint.cpp": "070e8a4b7f31b7892386e4c8ed098d8c25d705237210ec07d289f1816fee80ad",
+    "src/common/crypto.cpp": "222085f848a890920e05d8a3217df6474c58b0825cb1ad52e3b4042a28147cf5",
+    "src/common/radio_hardware.cpp": "a39e60d4e2e2c88ba31505c694cfdab9e00899f31938840a749e2c65dd401344",
+    "src/rx/RxController.cpp": "f7df8da5537a4d04e07c9bb673d03a498b445cdb422ce0f2010a87f3a503c817",
+    "src/rx/main.cpp": "1d521e613ea8e446a549dfdab534e1d51f027a1ed75fc93c32238d0c64e96f62",
+    "src/tx/TxController.cpp": "68949904d5678bf42134501733a47fa77021cf927cdef8b67f0b8995ac1341dd",
+    "src/tx/main.cpp": "434727bbb91465df309cbc19d9f628a974076593c337b5a4ea520b55c8a4fbbf"
+  },
+  "source_note": "Built from base_commit plus the E22 current-limit fix. Source input hashes identify the exact included firmware sources; documentation changes do not alter these binaries."
+}

@@ -75,6 +75,7 @@ static void rxFailureReinitializesRadio(bool airborne) {
     testMillis = air.retryRadioAt_;
     air.update();
     assert(radio.beginCalls == 2 && radio.receiving && air.radioReady_);
+    assert(radio.currentLimitAtReceive == 140);
     const canlink::Packet retained = air.endpoint_.packet(canlink::PacketKind::Poll, true, true);
     assert(retained.count == 1 && retained.sequence == active.sequence && retained.session == active.session);
     assert(air.endpoint_.peerSession() == 77);
@@ -165,7 +166,81 @@ static void channelFailureStopsSendingUntilReinitialized() {
     assert(ground.radioReady_ && radio.receiving);
 }
 
+static void configurePowerForEveryModulation(bool airborne) {
+    const classModulation modes[] = {
+        classModulation::GFSK100, classModulation::GFSK250,
+        classModulation::LORA_SF7, classModulation::LORA_SF9
+    };
+    for (classModulation mode : modes) {
+        reset();
+        BridgeController bridge(airborne);
+        bridge.begin();
+        assert(bridge.radioReady_ && radio.currentLimitAtReceive == 140);
+        // Reinitialization resets the chip OCP in RadioLib. The application
+        // must restore it after begin and before receiving, on both roles.
+        ModemConfig cfg = bridge.config_;
+        cfg.modulation = mode;
+        cfg.txPowerDbm = 22;
+        Serial.output.clear();
+        assert(bridge.configure(cfg));
+        assert(radio.chipPower == 22 && radio.currentLimitAtReceive == 140);
+        assert(radio.currentLimitCalls == 2);
+        assert(Serial.output.find("CHIP_PWR=22,OCP_MA=140") != std::string::npos);
+    }
+}
+
+static void currentLimitFailureStopsRadioAndRetries(bool airborne) {
+    reset();
+    radio.currentLimitState = -17;
+    BridgeController bridge(airborne);
+    bridge.begin();
+    assert(!bridge.radioReady_ && !radio.receiving && radio.receiveCalls == 0);
+    assert(Serial.output.find("ERROR: RADIO_START=-17") != std::string::npos);
+    assert(Serial.output.find("+RADIO: READY") == std::string::npos);
+    assert(Serial.output.find("CHIP_PWR=") == std::string::npos);
+    radio.currentLimitState = 0;
+    testMillis = bridge.retryRadioAt_;
+    bridge.update();
+    assert(bridge.radioReady_ && radio.receiving);
+    assert(radio.beginCalls == 2 && radio.currentLimitAtReceive == 140);
+}
+
+static void beginFailureIsNotHiddenByCurrentLimitSetup() {
+    reset();
+    radio.beginState = -2;
+    BridgeController bridge(false);
+    bridge.begin();
+    assert(!bridge.radioReady_ && radio.receiveCalls == 0);
+    assert(radio.currentLimitCalls == 0);
+    assert(Serial.output.find("ERROR: RADIO_START=-2") != std::string::npos);
+}
+
+static void lostCurrentLimitWriteCannotClaimReady(bool airborne) {
+    reset();
+    // In pinned RadioLib a register write returns success even when the
+    // hardware did not retain it. Readback must gate RX/TX and READY.
+    radio.currentLimitWriteLost = true;
+    BridgeController bridge(airborne);
+    bridge.begin();
+    assert(!bridge.radioReady_ && radio.receiveCalls == 0);
+    assert(Serial.output.find("RADIO_OCP_READBACK=60") != std::string::npos);
+    assert(Serial.output.find("+RADIO: READY") == std::string::npos);
+    bridge.update();
+    assert(bridge.radioTx_ == 0);
+    radio.currentLimitWriteLost = false;
+    testMillis = bridge.retryRadioAt_;
+    bridge.update();
+    assert(bridge.radioReady_ && radio.currentLimitAtReceive == 140);
+}
+
 int main() {
+    lostCurrentLimitWriteCannotClaimReady(true);
+    lostCurrentLimitWriteCannotClaimReady(false);
+    configurePowerForEveryModulation(true);
+    configurePowerForEveryModulation(false);
+    currentLimitFailureStopsRadioAndRetries(true);
+    currentLimitFailureStopsRadioAndRetries(false);
+    beginFailureIsNotHiddenByCurrentLimitSetup();
     rxFailureReinitializesRadio(true);
     rxFailureReinitializesRadio(false);
     fhssOffKeepsPrimaryChannel(true);
@@ -173,5 +248,5 @@ int main() {
     failedCanStartRetriesWithBackoff();
     recoverEveryRxEntry();
     channelFailureStopsSendingUntilReinitialized();
-    std::puts("Bridge RX recovery, CAN retry, fixed channels and error backoff passed");
+    std::puts("Bridge power configuration, RX recovery, CAN retry and error backoff passed");
 }

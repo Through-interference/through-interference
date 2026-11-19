@@ -15,6 +15,9 @@ static const uint8_t LORA_DIO1 = 33;
 static const uint8_t LORA_RXEN = 32;
 static const uint8_t LORA_TXEN = 25;
 
+// SX1262 OCP, not the supply current of the complete E22-900M30S module.
+static constexpr float RADIO_CURRENT_LIMIT_MA = 140.0f;
+
 // Application-level node IDs. Keep identical on both boards.
 static const uint32_t TX_NODE_ID = 1;
 static const uint32_t RX_NODE_ID = 2;

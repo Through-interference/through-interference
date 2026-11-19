@@ -57,6 +57,18 @@ bool BridgeController::configure(const ModemConfig& c) {
                                 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, c.txPowerDbm, 8, 1.8f); break;
         default: state = -1;
     }
+    // RadioLib 7.1.2 resets OCP to 60 mA in both begin paths. Restore the
+    // SX1262 high-power limit after every initialization, including recovery.
+    if (state == RADIOLIB_ERR_NONE) state = radio.setCurrentLimit(RADIO_CURRENT_LIMIT_MA);
+    // This RadioLib version cannot report a failed register write. Verify OCP
+    // readback before allowing RX/TX or announcing the configured limit.
+    if (state == RADIOLIB_ERR_NONE) {
+        const float actualLimit = radio.getCurrentLimit();
+        if (actualLimit != RADIO_CURRENT_LIMIT_MA) {
+            Serial.printf("ERROR: RADIO_OCP_READBACK=%.1f,EXPECTED=%.0f\n", actualLimit, RADIO_CURRENT_LIMIT_MA);
+            state = RADIOLIB_ERR_INVALID_CURRENT_LIMIT;
+        }
+    }
     if (state == RADIOLIB_ERR_NONE && !cryptoUpdateKey(c.aesKey)) state = -1;
     if (state == RADIOLIB_ERR_NONE && !c.fhssEnabled &&
         !radioChannelManager.setChannel(RADIO_PRIMARY_CHANNEL)) state = -1;
@@ -66,7 +78,10 @@ bool BridgeController::configure(const ModemConfig& c) {
     if (state == RADIOLIB_ERR_NONE) state = radio.startReceive();
     radioReady_ = state == RADIOLIB_ERR_NONE;
     if (!radioReady_) Serial.printf("ERROR: RADIO_START=%d\n", state);
-    else Serial.println("+RADIO: READY");
+    else {
+        Serial.printf("+RADIO: CONFIG CHIP_PWR=%d,OCP_MA=%.0f\n", c.txPowerDbm, RADIO_CURRENT_LIMIT_MA);
+        Serial.println("+RADIO: READY");
+    }
     retryRadioAt_ = millis() + 2000; nextPollAt_ = millis() + 30;
     return radioReady_;
 }

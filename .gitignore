@@ -6,6 +6,8 @@
 crypto_secrets.h
 .venv/
 .console-venv/
+.flash-venv/
+backup-*.bin
 __pycache__/
 *.pyc
 .superpowers/
